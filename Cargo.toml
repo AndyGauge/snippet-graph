@@ -10,3 +10,8 @@ thiserror = { workspace = true }
 syn = { workspace = true }
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
+inference-providers = { path = "../inference-providers" }
+
+[[bin]]
+name = "sg"
+path = "src/bin/sg.rs"
