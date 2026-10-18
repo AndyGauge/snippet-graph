@@ -12,6 +12,7 @@ use snippet_graph::{Graph, NodeId, NodeKind, TestReport};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,9 +23,17 @@ const REPAIR_ROUNDS: usize = 4;
 const DEFAULT_WIDTH: usize = 4;
 const MAX_TOKENS: u32 = 16000;
 
+#[derive(Default)]
+struct Usage {
+    input: AtomicU64,
+    output: AtomicU64,
+    calls: AtomicU64,
+}
+
 struct RegistryGenerator {
     registry: Arc<Registry>,
     slot: Option<usize>,
+    usage: Arc<Usage>,
 }
 
 const SYSTEM: &str = "You are a precise Rust engineer. Output only what is asked, no commentary.";
@@ -39,10 +48,22 @@ impl Generator for RegistryGenerator {
             1,
         );
         req.slot_hint = self.slot;
-        self.registry
-            .complete(&req)
-            .map(|r| r.text)
-            .map_err(|e| e.to_string())
+        let started = Instant::now();
+        let response = self.registry.complete(&req).map_err(|e| e.to_string())?;
+        self.usage
+            .input
+            .fetch_add(u64::from(response.input_tokens), Ordering::Relaxed);
+        self.usage
+            .output
+            .fetch_add(u64::from(response.output_tokens), Ordering::Relaxed);
+        let n = self.usage.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        eprintln!(
+            "  model call {n}: {}s, {}+{} tokens",
+            started.elapsed().as_secs(),
+            response.input_tokens,
+            response.output_tokens
+        );
+        Ok(response.text)
     }
 }
 
@@ -60,7 +81,7 @@ fn strip_fences(text: &str) -> String {
 
 fn skeleton_prompt(spec: &str, errors: &[String], previous: &str) -> String {
     let mut p = format!(
-        "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Output only Rust source.\n\nSpec:\n{spec}\n"
+        "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Private helpers that need no state must be free functions, not methods taking `&self`; every private item must be called by something, since unused items fail the lint. Output only Rust source.\n\nSpec:\n{spec}\n"
     );
     if !errors.is_empty() {
         p.push_str(&format!(
@@ -169,9 +190,11 @@ fn run(args: Args) -> Result<bool, String> {
     let started = Instant::now();
     let spec = std::fs::read_to_string(&args.spec).map_err(|e| e.to_string())?;
     let registry = Arc::new(Registry::from_config(&Config::load()));
+    let usage = Arc::new(Usage::default());
     let mut gen = RegistryGenerator {
         registry: registry.clone(),
         slot: None,
+        usage: usage.clone(),
     };
     let crate_dir = args.crate_dir;
 
@@ -201,6 +224,7 @@ fn run(args: Args) -> Result<bool, String> {
             Box::new(RegistryGenerator {
                 registry: registry.clone(),
                 slot: Some(i),
+                usage: usage.clone(),
             }) as Box<dyn Generator + Send>
         })
         .collect();
@@ -234,7 +258,28 @@ fn run(args: Args) -> Result<bool, String> {
         let mut run_tests = |g: &Graph, only: &[NodeId]| {
             verify::run_tests(&crate_dir, &assemble(g), only).unwrap_or_default()
         };
-        let again = fill_all_tested(&mut graph, &mut gen, &mut run_tests, FILL_RETRIES);
+        let mut again = fill_all_tested(&mut graph, &mut gen, &mut run_tests, FILL_RETRIES);
+        if !again.failed.is_empty() {
+            for (id, why) in &again.failed {
+                eprintln!("  revising tests for {}", id.0);
+                let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
+                let _ = testgen::revise_tests(
+                    &mut graph,
+                    &spec,
+                    id,
+                    std::slice::from_ref(why),
+                    &mut gen,
+                    &mut check_tests,
+                    TESTGEN_RETRIES,
+                );
+            }
+            let second = fill_all_tested(&mut graph, &mut gen, &mut run_tests, FILL_RETRIES);
+            again.filled.extend(second.filled);
+            again.failed = second.failed;
+            for (id, n) in second.retries {
+                *again.retries.entry(id).or_default() += n;
+            }
+        }
         outcome.filled.extend(again.filled);
         outcome.failed.extend(again.failed);
         for (id, n) in again.retries {
@@ -255,8 +300,13 @@ fn run(args: Args) -> Result<bool, String> {
             metrics.record_retry(id);
         }
     }
+    metrics.input_tokens = usage.input.load(Ordering::Relaxed);
+    metrics.output_tokens = usage.output.load(Ordering::Relaxed);
     metrics.wall_ms = started.elapsed().as_millis() as u64;
 
+    outcome
+        .failed
+        .retain(|(id, _)| graph.nodes.get(id).is_some_and(|n| !n.is_filled()));
     let ok = outcome.failed.is_empty()
         && untested.is_empty()
         && final_report.compiled

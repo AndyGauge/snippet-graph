@@ -202,7 +202,7 @@ fn remove_tests(graph: &mut Graph, ids: &[NodeId]) {
     }
 }
 
-fn rejection(report: &TestReport, new_ids: &[NodeId]) -> Option<String> {
+fn rejection(report: &TestReport, new_ids: &[NodeId], require_red: bool) -> Option<String> {
     if !report.compiled {
         let mut lines: Vec<String> = Vec::new();
         for (id, errs) in &report.build_errors {
@@ -225,7 +225,7 @@ fn rejection(report: &TestReport, new_ids: &[NodeId]) -> Option<String> {
     for id in new_ids {
         match report.outcomes.iter().find(|o| &o.test == id) {
             None => problems.push(format!("{} was not run", id.0)),
-            Some(o) if o.passed => problems.push(format!(
+            Some(o) if o.passed && require_red => problems.push(format!(
                 "{} passed against the unimplemented skeleton; it must fail until the function is implemented",
                 id.0
             )),
@@ -254,44 +254,109 @@ pub fn generate_all(
         .map(|n| n.id.clone())
         .collect();
     let mut failed = Vec::new();
-
     for subject in subjects {
-        let mut errors: Vec<String> = Vec::new();
-        let mut accepted = false;
-        for _ in 0..=max_retries {
-            let prompt = build_prompt(spec, graph, &subject, &errors);
-            let nodes = match generator
-                .generate(&prompt)
-                .and_then(|r| parse_tests(graph, &subject, &r))
-            {
-                Ok(nodes) => nodes,
-                Err(e) => {
-                    errors = vec![e];
-                    continue;
-                }
-            };
-            let ids: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
-            for node in &nodes {
-                graph.insert(node.clone());
-                link_test(graph, node, &subject);
-            }
-            let report = check(graph);
-            match rejection(&report, &ids) {
-                None => {
-                    accepted = true;
-                    break;
-                }
-                Some(reason) => {
-                    remove_tests(graph, &ids);
-                    errors = vec![reason];
-                }
-            }
-        }
-        if !accepted {
-            failed.push((subject, errors.join("\n")));
+        if let Err(e) = generate_for(
+            graph,
+            spec,
+            &subject,
+            generator,
+            check,
+            max_retries,
+            true,
+            Vec::new(),
+        ) {
+            failed.push((subject, e));
         }
     }
     failed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_for(
+    graph: &mut Graph,
+    spec: &str,
+    subject: &NodeId,
+    generator: &mut dyn Generator,
+    check: &mut dyn FnMut(&Graph) -> TestReport,
+    max_retries: usize,
+    require_red: bool,
+    mut errors: Vec<String>,
+) -> Result<(), String> {
+    for _ in 0..=max_retries {
+        let prompt = build_prompt(spec, graph, subject, &errors);
+        let nodes = match generator
+            .generate(&prompt)
+            .and_then(|r| parse_tests(graph, subject, &r))
+        {
+            Ok(nodes) => nodes,
+            Err(e) => {
+                errors = vec![e];
+                continue;
+            }
+        };
+        let ids: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+        for node in &nodes {
+            graph.insert(node.clone());
+            link_test(graph, node, subject);
+        }
+        let report = check(graph);
+        match rejection(&report, &ids, require_red) {
+            None => return Ok(()),
+            Some(reason) => {
+                remove_tests(graph, &ids);
+                errors = vec![reason];
+            }
+        }
+    }
+    Err(errors.join("\n"))
+}
+
+/// Replace a subject's tests after its implementation kept failing them. The
+/// failure messages go into the prompt along with the instruction to drop any
+/// assertion the spec does not state. The new tests must compile but are not
+/// required to fail, since the subject is already implemented.
+pub fn revise_tests(
+    graph: &mut Graph,
+    spec: &str,
+    subject: &NodeId,
+    failures: &[String],
+    generator: &mut dyn Generator,
+    check: &mut dyn FnMut(&Graph) -> TestReport,
+    max_retries: usize,
+) -> Result<(), String> {
+    let prefix = format!("test::{}::", subject.0);
+    let old: Vec<NodeId> = graph
+        .nodes
+        .values()
+        .filter(|n| n.kind == NodeKind::Test && n.id.0.starts_with(&prefix))
+        .map(|n| n.id.clone())
+        .collect();
+    let saved: Vec<Node> = old
+        .iter()
+        .filter_map(|id| graph.nodes.get(id).cloned())
+        .collect();
+    remove_tests(graph, &old);
+    let mut errors = vec![
+        "The previous tests for this function kept failing against implementations. Some assertions may have gone beyond what the specification states (for example OS-specific error kinds, orderings or paths the spec does not fix). Rewrite the tests asserting only what the specification states. Failures seen:".to_string(),
+    ];
+    errors.extend(failures.iter().cloned());
+    let result = generate_for(
+        graph,
+        spec,
+        subject,
+        generator,
+        check,
+        max_retries,
+        false,
+        errors,
+    );
+    if result.is_err() {
+        for node in saved {
+            graph.insert(node.clone());
+            link_test(graph, &node, subject);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -435,5 +500,59 @@ mod tests {
         assert!(failed[0].1.contains("passed"));
         assert!(!g.nodes.contains_key(&nid("test::add::adds")));
         assert!(!g.uses.contains_key(&nid("test::add::adds")));
+    }
+
+    #[test]
+    fn revise_replaces_tests_without_requiring_red() {
+        let mut g = graph();
+        let mut gen = Fake(VecDeque::from([Ok(GOOD.to_string())]), Vec::new());
+        let mut check = |_: &Graph| report(true, &[("test::add::adds", true)]);
+        generate_for(
+            &mut g,
+            "spec",
+            &nid("add"),
+            &mut gen,
+            &mut check,
+            0,
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut gen = Fake(VecDeque::from([Ok(GOOD.to_string())]), Vec::new());
+        revise_tests(
+            &mut g,
+            "spec",
+            &nid("add"),
+            &["left: Other right: AlreadyExists".into()],
+            &mut gen,
+            &mut check,
+            0,
+        )
+        .unwrap();
+        assert!(g.nodes.contains_key(&nid("test::add::adds")));
+        assert!(gen.1[0].contains("AlreadyExists"));
+        assert!(gen.1[0].contains("only what the specification states"));
+    }
+
+    #[test]
+    fn failed_revision_restores_old_tests() {
+        let mut g = graph();
+        let mut gen = Fake(VecDeque::from([Ok(GOOD.to_string())]), Vec::new());
+        let mut check = |_: &Graph| report(true, &[("test::add::adds", true)]);
+        generate_for(
+            &mut g,
+            "spec",
+            &nid("add"),
+            &mut gen,
+            &mut check,
+            0,
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut gen = Fake(VecDeque::from([Err("down".into())]), Vec::new());
+        let result = revise_tests(&mut g, "spec", &nid("add"), &[], &mut gen, &mut check, 0);
+        assert!(result.is_err());
+        assert!(g.nodes.contains_key(&nid("test::add::adds")));
     }
 }

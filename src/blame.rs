@@ -1,4 +1,4 @@
-use crate::model::{Graph, NodeId, TestOutcome};
+use crate::model::{Graph, NodeId, NodeKind, TestOutcome};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10,7 +10,7 @@ pub struct Suspect {
 const RECENT_BONUS: f64 = 0.5;
 const PASSING_PENALTY: f64 = 1.0;
 
-/// Rank non-test nodes by how likely they are to be the cause of the failing
+/// Rank function and method nodes (the only ones with a body to refill) by how likely they are to be the cause of the failing
 /// outcomes, highest score first, ties broken by `NodeId`. A node reached by a
 /// passing test is down-weighted; a node reached by few failing tests, or only
 /// by failing tests, and any node in `recently_filled`, is up-weighted. Nodes
@@ -19,6 +19,13 @@ pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId])
     let mut reach: BTreeMap<&NodeId, (usize, usize)> = BTreeMap::new();
     for outcome in outcomes {
         for subject in graph.subjects_of(&outcome.test) {
+            let fillable = graph
+                .nodes
+                .get(subject)
+                .is_some_and(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method));
+            if !fillable {
+                continue;
+            }
             let entry = reach.entry(subject).or_default();
             if outcome.passed {
                 entry.0 += 1;
@@ -173,5 +180,14 @@ mod tests {
             assert_eq!(names(&ranked), case.expected, "{}", case.name);
             assert_eq!(ranked, rank(&g, &outcomes, &recent), "{}", case.name);
         }
+    }
+
+    #[test]
+    fn non_function_subjects_are_never_suspects() {
+        let mut g = graph(&[("t", &["f", "Err"])]);
+        g.nodes.get_mut(&id("Err")).unwrap().kind = NodeKind::Type;
+        let ranked = rank(&g, &[out("t", false)], &[]);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].node, id("f"));
     }
 }
