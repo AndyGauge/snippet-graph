@@ -200,6 +200,7 @@ fn link(graph: &mut Graph) {
         }
     }
     graph.uses = uses;
+    crate::edges::resolve(graph);
 }
 
 fn identifiers(text: &str) -> BTreeSet<String> {

@@ -12,6 +12,7 @@ pub enum NodeKind {
     Const,
     Function,
     Method,
+    Test,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +25,7 @@ pub struct Placement {
 pub struct Node {
     pub id: NodeId,
     pub kind: NodeKind,
-    /// Item text up to the body for Function/Method (`pub fn f(x: u32) -> u32`);
+    /// Item text up to the body for Function/Method/Test (`#[test] fn name()` for tests) (`pub fn f(x: u32) -> u32`);
     /// the full item text for every other kind.
     pub signature: String,
     /// Block text including braces. `None` means unfilled and renders as `{ todo!() }`.
@@ -44,14 +45,14 @@ pub struct Graph {
 impl Node {
     pub fn is_filled(&self) -> bool {
         match self.kind {
-            NodeKind::Function | NodeKind::Method => self.body.is_some(),
+            NodeKind::Function | NodeKind::Method | NodeKind::Test => self.body.is_some(),
             _ => true,
         }
     }
 
     pub fn render(&self) -> String {
         match self.kind {
-            NodeKind::Function | NodeKind::Method => {
+            NodeKind::Function | NodeKind::Method | NodeKind::Test => {
                 let body = self.body.as_deref().unwrap_or("{ todo!() }");
                 format!("{} {}", self.signature, body)
             }
@@ -74,5 +75,49 @@ impl Graph {
 
     pub fn dependencies(&self, id: &NodeId) -> impl Iterator<Item = &NodeId> {
         self.uses.get(id).into_iter().flatten()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestOutcome {
+    pub test: NodeId,
+    pub passed: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TestReport {
+    pub compiled: bool,
+    pub outcomes: Vec<TestOutcome>,
+    /// Compile errors attributed to the node whose span contains them.
+    pub build_errors: BTreeMap<NodeId, Vec<String>>,
+    pub unattributed: Vec<String>,
+}
+
+impl Graph {
+    /// Test nodes that exercise `id`.
+    pub fn tests_for(&self, id: &NodeId) -> Vec<&NodeId> {
+        self.uses
+            .iter()
+            .filter(|(test, deps)| {
+                deps.contains(id)
+                    && self
+                        .nodes
+                        .get(*test)
+                        .is_some_and(|n| n.kind == NodeKind::Test)
+            })
+            .map(|(test, _)| test)
+            .collect()
+    }
+
+    /// Non-test nodes that the test `id` exercises.
+    pub fn subjects_of(&self, id: &NodeId) -> Vec<&NodeId> {
+        self.dependencies(id)
+            .filter(|dep| {
+                self.nodes
+                    .get(*dep)
+                    .is_some_and(|n| n.kind != NodeKind::Test)
+            })
+            .collect()
     }
 }

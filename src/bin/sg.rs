@@ -19,8 +19,17 @@ struct RegistryGenerator {
 
 impl Generator for RegistryGenerator {
     fn generate(&mut self, prompt: &str) -> Result<String, String> {
-        let req = InferenceRequest::new(self.system.clone(), prompt.into(), MAX_TOKENS, ModelTier::Heavy, 1);
-        self.registry.complete(&req).map(|r| r.text).map_err(|e| e.to_string())
+        let req = InferenceRequest::new(
+            self.system.clone(),
+            prompt.into(),
+            MAX_TOKENS,
+            ModelTier::Heavy,
+            1,
+        );
+        self.registry
+            .complete(&req)
+            .map(|r| r.text)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -30,7 +39,10 @@ fn strip_fences(text: &str) -> String {
         return t.to_string();
     };
     let rest = rest.split_once('\n').map_or("", |(_, body)| body);
-    rest.rsplit_once("```").map_or(rest, |(body, _)| body).trim().to_string()
+    rest.rsplit_once("```")
+        .map_or(rest, |(body, _)| body)
+        .trim()
+        .to_string()
 }
 
 fn skeleton_prompt(spec: &str, errors: &[String], previous: &str) -> String {
@@ -38,7 +50,10 @@ fn skeleton_prompt(spec: &str, errors: &[String], previous: &str) -> String {
         "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Output only Rust source.\n\nSpec:\n{spec}\n"
     );
     if !errors.is_empty() {
-        p.push_str(&format!("\nYour previous skeleton:\n{previous}\n\nIt failed to compile:\n{}\nFix it.\n", errors.join("\n")));
+        p.push_str(&format!(
+            "\nYour previous skeleton:\n{previous}\n\nIt failed to compile:\n{}\nFix it.\n",
+            errors.join("\n")
+        ));
     }
     p
 }
@@ -47,7 +62,11 @@ fn check_graph(crate_dir: &Path, graph: &Graph) -> std::io::Result<verify::Repor
     verify::check(crate_dir, &assemble(graph))
 }
 
-fn make_skeleton(gen: &mut RegistryGenerator, crate_dir: &Path, spec: &str) -> Result<Graph, String> {
+fn make_skeleton(
+    gen: &mut RegistryGenerator,
+    crate_dir: &Path,
+    spec: &str,
+) -> Result<Graph, String> {
     let mut errors = Vec::new();
     let mut previous = String::new();
     for attempt in 1..=SKELETON_ATTEMPTS {
@@ -64,9 +83,16 @@ fn make_skeleton(gen: &mut RegistryGenerator, crate_dir: &Path, spec: &str) -> R
         if report.ok {
             return Ok(graph);
         }
-        errors = report.by_node.into_values().flatten().chain(report.unattributed).collect();
+        errors = report
+            .by_node
+            .into_values()
+            .flatten()
+            .chain(report.unattributed)
+            .collect();
     }
-    Err(format!("no compiling skeleton after {SKELETON_ATTEMPTS} attempts"))
+    Err(format!(
+        "no compiling skeleton after {SKELETON_ATTEMPTS} attempts"
+    ))
 }
 
 fn run(spec_path: &Path, crate_dir: PathBuf) -> Result<(), String> {
@@ -79,10 +105,16 @@ fn run(spec_path: &Path, crate_dir: PathBuf) -> Result<(), String> {
     eprintln!("skeleton ok: {} nodes", graph.nodes.len());
 
     let mut check = |g: &Graph| -> BTreeMap<NodeId, Vec<String>> {
-        check_graph(&crate_dir, g).map(|r| r.by_node).unwrap_or_default()
+        check_graph(&crate_dir, g)
+            .map(|r| r.by_node)
+            .unwrap_or_default()
     };
     let outcome = fill_all(&mut graph, &mut gen, &mut check, FILL_RETRIES);
-    eprintln!("filled {}, failed {}", outcome.filled.len(), outcome.failed.len());
+    eprintln!(
+        "filled {}, failed {}",
+        outcome.filled.len(),
+        outcome.failed.len()
+    );
     for (id, why) in &outcome.failed {
         eprintln!("  failed {}: {why}", id.0);
     }

@@ -90,6 +90,26 @@ fn find_node(assembled: &Assembled, file: &Path, line: usize) -> Option<NodeId> 
         .map(|(id, _)| id.clone())
 }
 
+/// Write the files, run `cargo test --message-format=json`, and report each
+/// test's outcome with its panic text. A test's id is the Test node whose
+/// function name matches. `only` limits the run to those test nodes (all when
+/// empty). Compile errors go to `build_errors` as in `check`.
+pub fn run_tests(
+    crate_dir: &Path,
+    assembled: &Assembled,
+    only: &[NodeId],
+) -> std::io::Result<crate::model::TestReport> {
+    let _ = (crate_dir, assembled, only);
+    todo!()
+}
+
+/// Run `cargo clippy` and attribute each warning or error to a node via spans.
+/// `ok` is true only when there are none.
+pub fn clippy(crate_dir: &Path, assembled: &Assembled) -> std::io::Result<Report> {
+    let _ = (crate_dir, assembled);
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
