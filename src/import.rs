@@ -11,7 +11,8 @@ pub fn import_crate(crate_dir: &Path) -> Result<Graph, String> {
     files.sort();
     let mut graph = Graph::default();
     for path in files {
-        let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let source =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let rel = path.strip_prefix(crate_dir).map_err(|e| e.to_string())?;
         let parsed = skeleton::parse(rel, &source).map_err(|e| e.to_string())?;
         skeleton::merge(&mut graph, parsed);
@@ -111,11 +112,17 @@ mod tests {
     #[test]
     fn import_write_back_skips_unchanged_files() {
         let dir = setup("mtime");
-        let before = std::fs::metadata(dir.join("src/b.rs")).unwrap().modified().unwrap();
+        let before = std::fs::metadata(dir.join("src/b.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
         std::thread::sleep(Duration::from_millis(50));
         let graph = import_crate(&dir).unwrap();
         write_back(&dir, &graph).unwrap();
-        let after = std::fs::metadata(dir.join("src/b.rs")).unwrap().modified().unwrap();
+        let after = std::fs::metadata(dir.join("src/b.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
         assert_eq!(before, after);
         std::fs::remove_dir_all(&dir).unwrap();
     }

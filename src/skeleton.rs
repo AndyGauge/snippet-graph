@@ -128,6 +128,7 @@ pub fn parse(file: &Path, source: &str) -> Result<Graph, SkeletonError> {
                 for it in &imp.items {
                     if let ImplItem::Fn(m) = it {
                         let (signature, body) = split_fn(&text, m, &m.block);
+                        let (signature, body) = (dedent(&signature), body.map(|b| dedent(&b)));
                         let name = m.sig.ident.to_string();
                         let id = match &trait_name {
                             Some(t) => format!("{self_name}::{t}::{name}"),
@@ -151,6 +152,7 @@ pub fn parse(file: &Path, source: &str) -> Result<Graph, SkeletonError> {
                             continue;
                         }
                         let (signature, body) = split_fn(&text, &f.sig, &f.block);
+                        let (signature, body) = (dedent(&signature), body.map(|b| dedent(&b)));
                         let name = f.sig.ident.to_string();
                         let id = if name.starts_with("test::") {
                             name
@@ -162,7 +164,7 @@ pub fn parse(file: &Path, source: &str) -> Result<Graph, SkeletonError> {
                             id,
                             NodeKind::Test,
                             format!("#[test] {signature}"),
-                            Some(body.unwrap_or_else(|| text.block(&f.block))),
+                            Some(body.unwrap_or_else(|| dedent(&text.block(&f.block)))),
                             None,
                         );
                     }
@@ -283,6 +285,17 @@ fn last_end(item: &impl ToTokens) -> LineColumn {
         .last()
         .map(|t| t.span().end())
         .unwrap_or(LineColumn { line: 1, column: 0 })
+}
+
+/// assemble indents nested items by four spaces, so undo that here for round-trip stability.
+fn dedent(text: &str) -> String {
+    let mut lines = text.lines();
+    let mut out = lines.next().unwrap_or_default().to_string();
+    for line in lines {
+        out.push('\n');
+        out.push_str(line.strip_prefix("    ").unwrap_or(line));
+    }
+    out
 }
 
 fn split_fn(text: &Source, item: &impl ToTokens, block: &syn::Block) -> (String, Option<String>) {
@@ -454,7 +467,7 @@ impl Default for Foo {
         assert!(!g.nodes.contains_key(&id("test::helper")));
         assert_eq!(
             g.nodes[&id("test::todo_body")].body.as_deref(),
-            Some("{\n        todo!()\n    }")
+            Some("{\n    todo!()\n}")
         );
         assert_eq!(
             g.subjects_of(&id("test::goes")),
@@ -467,5 +480,14 @@ impl Default for Foo {
     #[test]
     fn parse_error() {
         assert!(parse(Path::new("a.rs"), "fn (").is_err());
+    }
+
+    #[test]
+    fn method_bodies_round_trip_stably() {
+        let src = "impl Foo {\n    pub fn go(&self) -> u32 {\n        let x = 1;\n        x + 1\n    }\n}\n";
+        let once = crate::assemble::assemble(&parse(Path::new("a.rs"), src).unwrap());
+        let text = once.files.values().next().unwrap().clone();
+        let twice = crate::assemble::assemble(&parse(Path::new("a.rs"), &text).unwrap());
+        assert_eq!(twice.files.values().next().unwrap(), &text);
     }
 }
