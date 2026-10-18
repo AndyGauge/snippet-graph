@@ -21,10 +21,15 @@ pub struct Assembled {
 pub fn assemble(graph: &Graph) -> Assembled {
     let mut per_file: BTreeMap<&Path, Vec<Item>> = BTreeMap::new();
     let mut impls: BTreeMap<(&Path, &str), Vec<&Node>> = BTreeMap::new();
+    let mut tests: BTreeMap<&Path, Vec<&Node>> = BTreeMap::new();
 
     for node in graph.nodes.values() {
         let file = node.placement.file.as_path();
         match (&node.kind, &node.impl_header) {
+            (NodeKind::Test, _) => {
+                per_file.entry(file).or_default();
+                tests.entry(file).or_default().push(node)
+            }
             (NodeKind::Method, Some(header)) => {
                 impls.entry((file, header.as_str())).or_default().push(node)
             }
@@ -79,6 +84,26 @@ pub fn assemble(graph: &Graph) -> Assembled {
                     line += 1;
                 }
             }
+        }
+        if let Some(mut group) = tests.remove(file) {
+            group.sort_by(|a, b| (a.placement.index, &a.id).cmp(&(b.placement.index, &b.id)));
+            if !items.is_empty() {
+                out.push('\n');
+                line += 1;
+            }
+            out.push_str("#[cfg(test)]\nmod tests {\n    use super::*;\n");
+            line += 3;
+            for node in group {
+                out.push('\n');
+                line += 1;
+                let text = indent(&node.render());
+                let count = text.lines().count().max(1);
+                record(&mut spans, node, file, line, line + count - 1);
+                out.push_str(&text);
+                out.push('\n');
+                line += count;
+            }
+            out.push_str("}\n");
         }
         files.insert(file.to_path_buf(), out);
     }
@@ -224,6 +249,41 @@ mod tests {
         assert_eq!(lines[7], "    }");
         assert_eq!(lines[10], "fn f() { todo!() }");
         assert_eq!(span("u").file, PathBuf::from("b.rs"));
+    }
+
+    #[test]
+    fn renders_test_module_last_with_spans() {
+        let mut g = sample();
+        g.insert(node(
+            "t2",
+            NodeKind::Test,
+            "#[test] fn two()",
+            Some("{\n    assert!(true);\n}"),
+            None,
+            "a.rs",
+            6,
+        ));
+        g.insert(node(
+            "t1",
+            NodeKind::Test,
+            "#[test] fn one()",
+            None,
+            None,
+            "a.rs",
+            5,
+        ));
+        let a = assemble(&g);
+        let text = &a.files[Path::new("a.rs")];
+        let tail = "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test] fn one() { todo!() }\n\n    #[test] fn two() {\n        assert!(true);\n    }\n}\n";
+        assert!(text.ends_with(tail));
+        let lines: Vec<&str> = text.lines().collect();
+        let s1 = &a.spans[&NodeId("t1".into())];
+        let s2 = &a.spans[&NodeId("t2".into())];
+        assert_eq!((s1.start_line, s1.end_line), (17, 17));
+        assert_eq!((s2.start_line, s2.end_line), (19, 21));
+        assert_eq!(lines[s1.start_line - 1], "    #[test] fn one() { todo!() }");
+        assert_eq!(lines[s2.end_line - 1], "    }");
+        assert_eq!(assemble(&g).files, a.files);
     }
 
     #[test]

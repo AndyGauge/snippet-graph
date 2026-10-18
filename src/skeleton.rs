@@ -144,6 +144,30 @@ pub fn parse(file: &Path, source: &str) -> Result<Graph, SkeletonError> {
                     }
                 }
             }
+            Item::Mod(m) if has_attr(&m.attrs, "cfg", Some("test")) => {
+                for it in m.content.iter().flat_map(|(_, items)| items) {
+                    if let Item::Fn(f) = it {
+                        if !has_attr(&f.attrs, "test", None) {
+                            continue;
+                        }
+                        let (signature, body) = split_fn(&text, &f.sig, &f.block);
+                        let name = f.sig.ident.to_string();
+                        let id = if name.starts_with("test::") {
+                            name
+                        } else {
+                            format!("test::{name}")
+                        };
+                        push(
+                            &mut graph,
+                            id,
+                            NodeKind::Test,
+                            format!("#[test] {signature}"),
+                            Some(body.unwrap_or_else(|| text.block(&f.block))),
+                            None,
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -201,6 +225,16 @@ fn link(graph: &mut Graph) {
     }
     graph.uses = uses;
     crate::edges::resolve(graph);
+}
+
+fn has_attr(attrs: &[syn::Attribute], name: &str, arg: Option<&str>) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident(name)
+            && match arg {
+                None => true,
+                Some(arg) => a.parse_args::<syn::Ident>().is_ok_and(|i| i == arg),
+            }
+    })
 }
 
 fn identifiers(text: &str) -> BTreeSet<String> {
@@ -302,6 +336,14 @@ impl<'a> Source<'a> {
         &self.src[self.offset(from)..self.offset(to)]
     }
 
+    fn block(&self, block: &syn::Block) -> String {
+        self.slice(
+            block.brace_token.span.open().start(),
+            block.brace_token.span.close().end(),
+        )
+        .to_string()
+    }
+
     fn item(&self, item: &impl ToTokens) -> String {
         self.slice(first_start(item), last_end(item)).to_string()
     }
@@ -397,6 +439,29 @@ impl Default for Foo {
         assert_eq!(a.dependencies(&id("f")).count(), 0);
         merge(&mut a, b);
         assert_eq!(a.dependencies(&id("f")).next(), Some(&id("B")));
+    }
+
+    #[test]
+    fn test_module_becomes_test_nodes() {
+        let src = format!(
+            "{SRC}\n#[cfg(test)]\nmod tests {{\n    use super::*;\n\n    fn helper() {{}}\n\n    #[test]\n    fn goes() {{\n        assert_eq!(filled(), 4);\n        make(1);\n    }}\n\n    #[test]\n    fn todo_body() {{\n        todo!()\n    }}\n}}\n"
+        );
+        let g = parse(Path::new("a.rs"), &src).unwrap();
+        let t = &g.nodes[&id("test::goes")];
+        assert_eq!(t.kind, NodeKind::Test);
+        assert_eq!(t.signature, "#[test] fn goes()");
+        assert!(t.body.as_ref().unwrap().contains("filled()"));
+        assert!(!g.nodes.contains_key(&id("test::helper")));
+        assert_eq!(
+            g.nodes[&id("test::todo_body")].body.as_deref(),
+            Some("{\n        todo!()\n    }")
+        );
+        assert_eq!(
+            g.subjects_of(&id("test::goes")),
+            vec![&id("filled"), &id("make")]
+        );
+        assert_eq!(g.tests_for(&id("filled")), vec![&id("test::goes")]);
+        assert!(g.tests_for(&id("Foo::go")).is_empty());
     }
 
     #[test]
