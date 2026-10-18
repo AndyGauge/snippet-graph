@@ -81,7 +81,7 @@ fn strip_fences(text: &str) -> String {
 
 fn skeleton_prompt(spec: &str, errors: &[String], previous: &str) -> String {
     let mut p = format!(
-        "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Private helpers that need no state must be free functions, not methods taking `&self`; every private item must be called by something, since unused items fail the lint. Output only Rust source.\n\nSpec:\n{spec}\n"
+        "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Private helpers that need no state must be free functions, not methods taking `&self`; never add a function whose only purpose is to call other functions. Output only Rust source.\n\nSpec:\n{spec}\n"
     );
     if !errors.is_empty() {
         p.push_str(&format!(
@@ -229,7 +229,11 @@ fn run(args: Args) -> Result<bool, String> {
         })
         .collect();
     let lint = |g: &Graph| -> BTreeMap<NodeId, Vec<String>> {
-        verify::clippy(&crate_dir, &assemble(g))
+        let mut assembled = assemble(g);
+        for text in assembled.files.values_mut() {
+            text.insert_str(0, "#![allow(dead_code)] ");
+        }
+        verify::clippy(&crate_dir, &assembled)
             .map(|r| r.by_node)
             .unwrap_or_default()
     };

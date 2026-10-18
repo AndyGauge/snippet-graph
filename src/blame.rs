@@ -14,7 +14,8 @@ const PASSING_PENALTY: f64 = 1.0;
 /// outcomes, highest score first, ties broken by `NodeId`. A node reached by a
 /// passing test is down-weighted; a node reached by few failing tests, or only
 /// by failing tests, and any node in `recently_filled`, is up-weighted. Nodes
-/// not reached by any failing test never appear.
+/// not reached by any failing test never appear. A suspect that depends on
+/// another suspect ranks after it, so the deepest failing helper is retried first.
 pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId]) -> Vec<Suspect> {
     let mut reach: BTreeMap<&NodeId, (usize, usize)> = BTreeMap::new();
     for outcome in outcomes {
@@ -59,7 +60,14 @@ pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId])
             .total_cmp(&a.score)
             .then_with(|| a.node.cmp(&b.node))
     });
-    suspects
+    let suspect_ids: std::collections::BTreeSet<NodeId> =
+        suspects.iter().map(|s| s.node.clone()).collect();
+    let (leaves, callers): (Vec<Suspect>, Vec<Suspect>) = suspects.into_iter().partition(|s| {
+        !graph
+            .dependencies(&s.node)
+            .any(|dep| suspect_ids.contains(dep))
+    });
+    leaves.into_iter().chain(callers).collect()
 }
 
 #[cfg(test)]
@@ -189,5 +197,14 @@ mod tests {
         let ranked = rank(&g, &[out("t", false)], &[]);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].node, id("f"));
+    }
+
+    #[test]
+    fn deepest_suspect_ranks_first() {
+        let mut g = graph(&[("t_caller", &["caller"]), ("t_helper", &["helper"])]);
+        g.add_use(&id("caller"), &id("helper"));
+        let ranked = rank(&g, &[out("t_caller", false), out("t_helper", false)], &[]);
+        assert_eq!(ranked[0].node, id("helper"));
+        assert_eq!(ranked[1].node, id("caller"));
     }
 }

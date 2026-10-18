@@ -289,11 +289,16 @@ fn last_end(item: &impl ToTokens) -> LineColumn {
 
 /// assemble indents nested items by four spaces, so undo that here for round-trip stability.
 fn dedent(text: &str) -> String {
-    let mut lines = text.lines();
-    let mut out = lines.next().unwrap_or_default().to_string();
-    for line in lines {
+    let inside_literal = crate::assemble::literal_continuation_lines(text);
+    let mut lines = text.lines().enumerate();
+    let mut out = lines.next().map(|(_, l)| l).unwrap_or_default().to_string();
+    for (i, line) in lines {
         out.push('\n');
-        out.push_str(line.strip_prefix("    ").unwrap_or(line));
+        if inside_literal.contains(&i) {
+            out.push_str(line);
+        } else {
+            out.push_str(line.strip_prefix("    ").unwrap_or(line));
+        }
     }
     out
 }
@@ -487,6 +492,16 @@ impl Default for Foo {
         let src = "impl Foo {\n    pub fn go(&self) -> u32 {\n        let x = 1;\n        x + 1\n    }\n}\n";
         let once = crate::assemble::assemble(&parse(Path::new("a.rs"), src).unwrap());
         let text = once.files.values().next().unwrap().clone();
+        let twice = crate::assemble::assemble(&parse(Path::new("a.rs"), &text).unwrap());
+        assert_eq!(twice.files.values().next().unwrap(), &text);
+    }
+
+    #[test]
+    fn string_literal_contents_survive_round_trip() {
+        let src = "impl Foo {\n    pub fn go(&self) -> String {\n        \"one\ntwo\".to_string()\n    }\n}\n";
+        let once = crate::assemble::assemble(&parse(Path::new("a.rs"), src).unwrap());
+        let text = once.files.values().next().unwrap().clone();
+        assert!(text.contains("\"one\ntwo\""));
         let twice = crate::assemble::assemble(&parse(Path::new("a.rs"), &text).unwrap());
         assert_eq!(twice.files.values().next().unwrap(), &text);
     }

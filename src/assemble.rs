@@ -135,11 +135,35 @@ fn record(spans: &mut BTreeMap<NodeId, Span>, node: &Node, file: &Path, start: u
     );
 }
 
+pub(crate) fn literal_continuation_lines(text: &str) -> std::collections::BTreeSet<usize> {
+    fn walk(stream: proc_macro2::TokenStream, out: &mut std::collections::BTreeSet<usize>) {
+        for tree in stream {
+            match tree {
+                proc_macro2::TokenTree::Group(g) => walk(g.stream(), out),
+                proc_macro2::TokenTree::Literal(l) => {
+                    let span = l.span();
+                    for line in span.start().line + 1..=span.end().line {
+                        out.insert(line - 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    if let Ok(stream) = text.parse::<proc_macro2::TokenStream>() {
+        walk(stream, &mut out);
+    }
+    out
+}
+
 fn indent(text: &str) -> String {
+    let inside_literal = literal_continuation_lines(text);
     text.lines()
-        .map(|l| {
-            if l.is_empty() {
-                String::new()
+        .enumerate()
+        .map(|(i, l)| {
+            if l.is_empty() || inside_literal.contains(&i) {
+                l.to_string()
             } else {
                 format!("    {l}")
             }
@@ -290,5 +314,13 @@ mod tests {
     fn deterministic() {
         let g = sample();
         assert_eq!(assemble(&g).files, assemble(&g).files);
+    }
+
+    #[test]
+    fn indent_leaves_multiline_string_contents_alone() {
+        let text = "fn f() -> &'static str {\n    \"a\n  b\"\n}";
+        let out = indent(text);
+        assert!(out.contains("\"a\n  b\""));
+        assert!(out.starts_with("    fn f()"));
     }
 }
