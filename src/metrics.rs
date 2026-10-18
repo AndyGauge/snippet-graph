@@ -15,8 +15,11 @@ impl RunMetrics {
     }
 
     pub fn to_json(&self) -> String {
-        let retries: BTreeMap<&str, usize> =
-            self.retries.iter().map(|(k, v)| (k.0.as_str(), *v)).collect();
+        let retries: BTreeMap<&str, usize> = self
+            .retries
+            .iter()
+            .map(|(k, v)| (k.0.as_str(), *v))
+            .collect();
         serde_json::json!({
             "retries": retries,
             "total_retries": self.retries.values().sum::<usize>(),

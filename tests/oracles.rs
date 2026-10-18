@@ -53,5 +53,9 @@ fn planning_store_mission_txt_mutant_fails() {
     let r = reference("planning_store");
     let mutated = r.replace("join(\"mission.md\")", "join(\"mission.txt\")");
     assert_ne!(r, mutated);
-    assert!(!run_oracle("planning_store", "planning_store_mutant", &mutated));
+    assert!(!run_oracle(
+        "planning_store",
+        "planning_store_mutant",
+        &mutated
+    ));
 }

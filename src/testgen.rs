@@ -10,11 +10,15 @@ const TEST_INDEX_BASE: usize = 1_000_000;
 /// Tests must use unique temp directories and assert only what the spec states.
 pub fn build_prompt(spec: &str, graph: &Graph, subject: &NodeId, errors: &[String]) -> String {
     let mut out = String::new();
-    out.push_str("Write Rust unit tests for one function, derived only from the specification below.\n");
+    out.push_str(
+        "Write Rust unit tests for one function, derived only from the specification below.\n",
+    );
     out.push_str("Rules:\n");
     out.push_str("- Respond with only `#[test] fn name() { ... }` functions; each test must be self-contained (no helper items).\n");
     out.push_str("- Keep tests small and aimed at the single function under test.\n");
-    out.push_str("- Assert only what the specification states; do not guess unspecified behavior.\n");
+    out.push_str(
+        "- Assert only what the specification states; do not guess unspecified behavior.\n",
+    );
     out.push_str("- Do not rely on any other function being correct beyond its signature.\n");
     out.push_str("- Anything touching the filesystem must use a unique directory under `std::env::temp_dir()` (include the test name and process id), never a shared path.\n");
     out.push_str("- The tests run inside `mod tests` with `use super::*;`.\n");
@@ -372,7 +376,11 @@ mod tests {
         assert_eq!(n.kind, NodeKind::Test);
         assert_eq!(n.signature, "#[test] fn adds()");
         assert!(n.body.as_deref().unwrap().starts_with('{'));
-        assert!(n.body.as_deref().unwrap().contains("assert_eq!(add(1, 2), 3);"));
+        assert!(n
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("assert_eq!(add(1, 2), 3);"));
         assert!(n.placement.index >= TEST_INDEX_BASE);
     }
 
@@ -407,7 +415,9 @@ mod tests {
         assert!(failed.is_empty());
         assert!(gen.1[1].contains("E0425 nope"));
         assert!(g.nodes.contains_key(&nid("test::add::adds")));
-        assert!(g.dependencies(&nid("test::add::adds")).any(|d| d == &nid("add")));
+        assert!(g
+            .dependencies(&nid("test::add::adds"))
+            .any(|d| d == &nid("add")));
         assert_eq!(g.tests_for(&nid("add")).len(), 1);
     }
 

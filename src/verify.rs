@@ -178,10 +178,7 @@ pub fn run_tests(
     if !only.is_empty() {
         command.arg("--");
         for id in only {
-            let name = names
-                .get(id)
-                .map(String::as_str)
-                .unwrap_or(id.0.as_str());
+            let name = names.get(id).map(String::as_str).unwrap_or(id.0.as_str());
             command.arg(name);
         }
     }
@@ -258,7 +255,10 @@ pub fn run_tests(
         let message = if passed {
             String::new()
         } else {
-            failures.get(&name).map(|m| m.trim().to_string()).unwrap_or_default()
+            failures
+                .get(&name)
+                .map(|m| m.trim().to_string())
+                .unwrap_or_default()
         };
         report.outcomes.push(TestOutcome {
             test: id,
@@ -314,7 +314,8 @@ pub fn clippy(crate_dir: &Path, assembled: &Assembled) -> std::io::Result<Report
             .unattributed
             .push(String::from_utf8_lossy(&output.stderr).into_owned());
     }
-    report.ok = output.status.success() && report.by_node.is_empty() && report.unattributed.is_empty();
+    report.ok =
+        output.status.success() && report.by_node.is_empty() && report.unattributed.is_empty();
     Ok(report)
 }
 
@@ -413,9 +414,17 @@ mod tests {
         let dir = temp_crate("tests");
         let report = run_tests(&dir, &tested(), &[]).unwrap();
         assert!(report.compiled);
-        let adds = report.outcomes.iter().find(|o| o.test.0 == "t_adds").unwrap();
+        let adds = report
+            .outcomes
+            .iter()
+            .find(|o| o.test.0 == "t_adds")
+            .unwrap();
         assert!(adds.passed);
-        let broken = report.outcomes.iter().find(|o| o.test.0 == "t_broken").unwrap();
+        let broken = report
+            .outcomes
+            .iter()
+            .find(|o| o.test.0 == "t_broken")
+            .unwrap();
         assert!(!broken.passed);
         assert!(broken.message.contains("sum was wrong"));
         let _ = std::fs::remove_dir_all(dir);

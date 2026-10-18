@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn parses_fenced_request_with_preamble() {
-        let r = parse_revision_request("Need change.\nREVISE Foo::new\n```rust\npub fn new(\n    x: u32,\n) -> Foo\n```\n").unwrap();
+        let r = parse_revision_request(
+            "Need change.\nREVISE Foo::new\n```rust\npub fn new(\n    x: u32,\n) -> Foo\n```\n",
+        )
+        .unwrap();
         assert_eq!(r.0, nid("Foo::new"));
         assert_eq!(r.1, "pub fn new(\n    x: u32,\n) -> Foo");
     }

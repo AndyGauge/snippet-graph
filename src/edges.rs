@@ -29,7 +29,11 @@ pub fn resolve(graph: &mut Graph) {
 
         for path in &collector.paths {
             let id = NodeId(path.clone());
-            if graph.nodes.get(&id).is_some_and(|n| n.kind == NodeKind::Method) {
+            if graph
+                .nodes
+                .get(&id)
+                .is_some_and(|n| n.kind == NodeKind::Method)
+            {
                 found.push((node.id.clone(), id));
             }
         }
@@ -123,8 +127,20 @@ mod tests {
     #[test]
     fn path_call_links_method() {
         let mut g = graph(vec![
-            node("Foo::new", NodeKind::Method, "pub fn new() -> Foo", "{ Foo }", Some("impl Foo")),
-            node("run", NodeKind::Function, "fn run()", "{ let _ = Foo::new(); }", None),
+            node(
+                "Foo::new",
+                NodeKind::Method,
+                "pub fn new() -> Foo",
+                "{ Foo }",
+                Some("impl Foo"),
+            ),
+            node(
+                "run",
+                NodeKind::Function,
+                "fn run()",
+                "{ let _ = Foo::new(); }",
+                None,
+            ),
         ]);
         resolve(&mut g);
         assert!(g.dependencies(&id("run")).any(|d| d == &id("Foo::new")));
@@ -133,8 +149,20 @@ mod tests {
     #[test]
     fn unique_receiver_call_links() {
         let mut g = graph(vec![
-            node("Foo::go", NodeKind::Method, "fn go(&self)", "{}", Some("impl Foo")),
-            node("run", NodeKind::Function, "fn run(x: Foo)", "{ x.go(); }", None),
+            node(
+                "Foo::go",
+                NodeKind::Method,
+                "fn go(&self)",
+                "{}",
+                Some("impl Foo"),
+            ),
+            node(
+                "run",
+                NodeKind::Function,
+                "fn run(x: Foo)",
+                "{ x.go(); }",
+                None,
+            ),
         ]);
         resolve(&mut g);
         let deps: Vec<_> = g.dependencies(&id("run")).collect();
@@ -144,9 +172,27 @@ mod tests {
     #[test]
     fn ambiguous_receiver_call_links_all() {
         let mut g = graph(vec![
-            node("Foo::go", NodeKind::Method, "fn go(&self)", "{}", Some("impl Foo")),
-            node("Bar::go", NodeKind::Method, "fn go(&self)", "{}", Some("impl Bar")),
-            node("t", NodeKind::Test, "#[test] fn t()", "{ make().go(); }", None),
+            node(
+                "Foo::go",
+                NodeKind::Method,
+                "fn go(&self)",
+                "{}",
+                Some("impl Foo"),
+            ),
+            node(
+                "Bar::go",
+                NodeKind::Method,
+                "fn go(&self)",
+                "{}",
+                Some("impl Bar"),
+            ),
+            node(
+                "t",
+                NodeKind::Test,
+                "#[test] fn t()",
+                "{ make().go(); }",
+                None,
+            ),
         ]);
         resolve(&mut g);
         let deps: Vec<_> = g.dependencies(&id("t")).collect();
@@ -156,17 +202,37 @@ mod tests {
     #[test]
     fn self_path_resolves_via_impl_header() {
         let mut g = graph(vec![
-            node("Foo::new", NodeKind::Method, "fn new() -> Foo", "{ Foo }", Some("impl Foo")),
-            node("Foo::dup", NodeKind::Method, "fn dup() -> Foo", "{ Self::new() }", Some("impl Foo")),
+            node(
+                "Foo::new",
+                NodeKind::Method,
+                "fn new() -> Foo",
+                "{ Foo }",
+                Some("impl Foo"),
+            ),
+            node(
+                "Foo::dup",
+                NodeKind::Method,
+                "fn dup() -> Foo",
+                "{ Self::new() }",
+                Some("impl Foo"),
+            ),
         ]);
         resolve(&mut g);
-        assert!(g.dependencies(&id("Foo::dup")).any(|d| d == &id("Foo::new")));
+        assert!(g
+            .dependencies(&id("Foo::dup"))
+            .any(|d| d == &id("Foo::new")));
     }
 
     #[test]
     fn idempotent_no_self_edges_keeps_existing() {
         let mut g = graph(vec![
-            node("Foo::rec", NodeKind::Method, "fn rec(&self)", "{ self.rec(); Foo::rec(self); }", Some("impl Foo")),
+            node(
+                "Foo::rec",
+                NodeKind::Method,
+                "fn rec(&self)",
+                "{ self.rec(); Foo::rec(self); }",
+                Some("impl Foo"),
+            ),
             node("other", NodeKind::Function, "fn other()", "{}", None),
         ]);
         g.add_use(&id("Foo::rec"), &id("other"));
@@ -181,7 +247,13 @@ mod tests {
     #[test]
     fn unparsable_text_is_ignored() {
         let mut g = graph(vec![
-            node("Foo::go", NodeKind::Method, "fn go(&self)", "{}", Some("impl Foo")),
+            node(
+                "Foo::go",
+                NodeKind::Method,
+                "fn go(&self)",
+                "{}",
+                Some("impl Foo"),
+            ),
             node("bad", NodeKind::Function, "fn bad(", "{ x.go( }", None),
         ]);
         resolve(&mut g);

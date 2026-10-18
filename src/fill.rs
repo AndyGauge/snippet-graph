@@ -231,7 +231,11 @@ fn affected_tests(graph: &Graph, ids: &[&NodeId]) -> Vec<NodeId> {
         let mut reach = crate::order::dependents(graph, id);
         reach.push((*id).clone());
         for r in reach {
-            if graph.nodes.get(&r).is_some_and(|n| n.kind == NodeKind::Test) {
+            if graph
+                .nodes
+                .get(&r)
+                .is_some_and(|n| n.kind == NodeKind::Test)
+            {
                 set.insert(r.clone());
             }
             set.extend(graph.tests_for(&r).into_iter().cloned());
