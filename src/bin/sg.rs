@@ -1,31 +1,44 @@
 use inference_providers::config::Config;
 use inference_providers::{InferenceRequest, ModelTier, Registry};
 use snippet_graph::assemble::assemble;
-use snippet_graph::fill::{fill_all, Generator};
+use snippet_graph::blame;
+use snippet_graph::fill::{fill_all_tested, Generator};
+use snippet_graph::metrics::RunMetrics;
+use snippet_graph::parallel::fill_parallel;
 use snippet_graph::skeleton;
+use snippet_graph::testgen;
 use snippet_graph::verify;
-use snippet_graph::{Graph, NodeId};
+use snippet_graph::{Graph, NodeId, NodeKind, TestReport};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Instant;
 
 const SKELETON_ATTEMPTS: usize = 4;
 const FILL_RETRIES: usize = 3;
+const TESTGEN_RETRIES: usize = 3;
+const REPAIR_ROUNDS: usize = 4;
+const DEFAULT_WIDTH: usize = 4;
 const MAX_TOKENS: u32 = 16000;
 
 struct RegistryGenerator {
-    registry: Registry,
-    system: String,
+    registry: Arc<Registry>,
+    slot: Option<usize>,
 }
+
+const SYSTEM: &str = "You are a precise Rust engineer. Output only what is asked, no commentary.";
 
 impl Generator for RegistryGenerator {
     fn generate(&mut self, prompt: &str) -> Result<String, String> {
-        let req = InferenceRequest::new(
-            self.system.clone(),
+        let mut req = InferenceRequest::new(
+            SYSTEM.into(),
             prompt.into(),
             MAX_TOKENS,
             ModelTier::Heavy,
             1,
         );
+        req.slot_hint = self.slot;
         self.registry
             .complete(&req)
             .map(|r| r.text)
@@ -95,41 +108,187 @@ fn make_skeleton(
     ))
 }
 
-fn run(spec_path: &Path, crate_dir: PathBuf) -> Result<(), String> {
-    let spec = std::fs::read_to_string(spec_path).map_err(|e| e.to_string())?;
+struct Args {
+    spec: PathBuf,
+    crate_dir: PathBuf,
+    oracle: Option<PathBuf>,
+    width: usize,
+}
+
+fn parse_args() -> Option<Args> {
+    let mut it = std::env::args().skip(1);
+    let mut positional = Vec::new();
+    let mut oracle = None;
+    let mut width = DEFAULT_WIDTH;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--oracle" => oracle = Some(PathBuf::from(it.next()?)),
+            "--width" => width = it.next()?.parse().ok()?,
+            _ => positional.push(a),
+        }
+    }
+    let [spec, dir] = <[String; 2]>::try_from(positional).ok()?;
+    Some(Args {
+        spec: spec.into(),
+        crate_dir: dir.into(),
+        oracle,
+        width,
+    })
+}
+
+fn all_tests(crate_dir: &Path, graph: &Graph) -> TestReport {
+    verify::run_tests(crate_dir, &assemble(graph), &[]).unwrap_or_default()
+}
+
+fn failing(report: &TestReport) -> usize {
+    report.outcomes.iter().filter(|o| !o.passed).count()
+}
+
+fn run_oracle(crate_dir: &Path, graph: &Graph, oracle: &Path) -> Result<bool, String> {
+    let work = std::env::temp_dir().join(format!("sg-oracle-{}", std::process::id()));
+    std::fs::create_dir_all(work.join("src")).map_err(|e| e.to_string())?;
+    std::fs::copy(crate_dir.join("Cargo.toml"), work.join("Cargo.toml"))
+        .map_err(|e| e.to_string())?;
+    let lib = assemble(graph)
+        .files
+        .into_values()
+        .next()
+        .unwrap_or_default();
+    let oracle_src = std::fs::read_to_string(oracle).map_err(|e| e.to_string())?;
+    std::fs::write(work.join("src/lib.rs"), format!("{lib}\n{oracle_src}"))
+        .map_err(|e| e.to_string())?;
+    let status = Command::new("cargo")
+        .args(["test", "--quiet"])
+        .current_dir(&work)
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(status.success())
+}
+
+fn run(args: Args) -> Result<bool, String> {
+    let started = Instant::now();
+    let spec = std::fs::read_to_string(&args.spec).map_err(|e| e.to_string())?;
+    let registry = Arc::new(Registry::from_config(&Config::load()));
     let mut gen = RegistryGenerator {
-        registry: Registry::from_config(&Config::load()),
-        system: "You are a precise Rust engineer. Output only what is asked, no commentary.".into(),
+        registry: registry.clone(),
+        slot: None,
     };
+    let crate_dir = args.crate_dir;
+
     let mut graph = make_skeleton(&mut gen, &crate_dir, &spec)?;
     eprintln!("skeleton ok: {} nodes", graph.nodes.len());
 
-    let mut check = |g: &Graph| -> BTreeMap<NodeId, Vec<String>> {
-        check_graph(&crate_dir, g)
+    let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
+    let untested = testgen::generate_all(
+        &mut graph,
+        &spec,
+        &mut gen,
+        &mut check_tests,
+        TESTGEN_RETRIES,
+    );
+    for (id, why) in &untested {
+        eprintln!("  no tests for {}: {why}", id.0);
+    }
+    let test_count = graph
+        .nodes
+        .values()
+        .filter(|n| n.kind == NodeKind::Test)
+        .count();
+    eprintln!("tests ok: {test_count} test nodes");
+
+    let mut generators: Vec<Box<dyn Generator + Send>> = (0..args.width.max(1))
+        .map(|i| {
+            Box::new(RegistryGenerator {
+                registry: registry.clone(),
+                slot: Some(i),
+            }) as Box<dyn Generator + Send>
+        })
+        .collect();
+    let lint = |g: &Graph| -> BTreeMap<NodeId, Vec<String>> {
+        verify::clippy(&crate_dir, &assemble(g))
             .map(|r| r.by_node)
             .unwrap_or_default()
     };
-    let outcome = fill_all(&mut graph, &mut gen, &mut check, FILL_RETRIES);
+    let mut outcome = fill_parallel(&mut graph, &mut generators, &lint, FILL_RETRIES);
     eprintln!(
         "filled {}, failed {}",
         outcome.filled.len(),
         outcome.failed.len()
     );
-    for (id, why) in &outcome.failed {
-        eprintln!("  failed {}: {why}", id.0);
+
+    for round in 1..=REPAIR_ROUNDS {
+        let report = all_tests(&crate_dir, &graph);
+        if report.compiled && failing(&report) == 0 {
+            break;
+        }
+        let suspects = blame::rank(&graph, &report.outcomes, &[]);
+        eprintln!(
+            "repair round {round}: {} failing tests, {} suspects",
+            failing(&report),
+            suspects.len()
+        );
+        let Some(top) = suspects.first() else { break };
+        if let Some(node) = graph.nodes.get_mut(&top.node) {
+            node.body = None;
+        }
+        let mut run_tests = |g: &Graph, only: &[NodeId]| {
+            verify::run_tests(&crate_dir, &assemble(g), only).unwrap_or_default()
+        };
+        let again = fill_all_tested(&mut graph, &mut gen, &mut run_tests, FILL_RETRIES);
+        outcome.filled.extend(again.filled);
+        outcome.failed.extend(again.failed);
+        for (id, n) in again.retries {
+            *outcome.retries.entry(id).or_default() += n;
+        }
     }
-    check_graph(&crate_dir, &graph).map_err(|e| e.to_string())?;
-    Ok(())
+
+    let final_report = all_tests(&crate_dir, &graph);
+    let lint_report = verify::clippy(&crate_dir, &assemble(&graph)).map_err(|e| e.to_string())?;
+    let oracle_ok = match &args.oracle {
+        Some(path) => Some(run_oracle(&crate_dir, &graph, path)?),
+        None => None,
+    };
+
+    let mut metrics = RunMetrics::default();
+    for (id, n) in &outcome.retries {
+        for _ in 0..*n {
+            metrics.record_retry(id);
+        }
+    }
+    metrics.wall_ms = started.elapsed().as_millis() as u64;
+
+    let ok = outcome.failed.is_empty()
+        && untested.is_empty()
+        && final_report.compiled
+        && failing(&final_report) == 0
+        && lint_report.ok
+        && oracle_ok.unwrap_or(true);
+    let summary = serde_json::json!({
+        "ok": ok,
+        "nodes": graph.nodes.len(),
+        "tests": test_count,
+        "failed_nodes": outcome.failed.iter().map(|(id, why)| format!("{}: {why}", id.0)).collect::<Vec<_>>(),
+        "untested_nodes": untested.iter().map(|(id, _)| id.0.clone()).collect::<Vec<_>>(),
+        "failing_tests": failing(&final_report),
+        "clippy_clean": lint_report.ok,
+        "oracle_passed": oracle_ok,
+        "metrics": serde_json::from_str::<serde_json::Value>(&metrics.to_json()).unwrap_or_default(),
+    });
+    println!("{summary:#}");
+    Ok(ok)
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let [spec, dir] = args.as_slice() else {
-        eprintln!("usage: sg <spec.md> <crate_dir>");
+    let Some(args) = parse_args() else {
+        eprintln!("usage: sg <spec.md> <crate_dir> [--oracle file.rs] [--width N]");
         std::process::exit(2);
     };
-    if let Err(e) = run(Path::new(spec), PathBuf::from(dir)) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+    match run(args) {
+        Ok(true) => {}
+        Ok(false) => std::process::exit(1),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
     }
 }

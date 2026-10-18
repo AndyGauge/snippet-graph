@@ -212,8 +212,11 @@ mod tests {
         let s = crate::fill::fill_all(&mut serial, &mut gen, &mut |g| check(g), 2);
 
         let mut par = sample();
-        let mut gens: Vec<Box<dyn Generator + Send>> =
-            vec![Box::new(Fake::plain()), Box::new(Fake::plain()), Box::new(Fake::plain())];
+        let mut gens: Vec<Box<dyn Generator + Send>> = vec![
+            Box::new(Fake::plain()),
+            Box::new(Fake::plain()),
+            Box::new(Fake::plain()),
+        ];
         let p = fill_parallel(&mut par, &mut gens, &check, 2);
 
         assert_eq!(serial, par);
@@ -260,10 +263,18 @@ mod tests {
         assert_eq!(out.retries.len(), 1);
         assert_eq!(out.retries[&NodeId("b".into())], 1);
         let log = log.lock().unwrap();
-        let b_prompts: Vec<_> = log.iter().filter(|p| p.contains("\n\n```rust\nfn b()")).collect();
+        let b_prompts: Vec<_> = log
+            .iter()
+            .filter(|p| p.contains("\n\n```rust\nfn b()"))
+            .collect();
         assert_eq!(b_prompts.len(), 2);
         assert!(b_prompts[1].contains("broken"));
-        assert_eq!(log.iter().filter(|p| p.contains("\n\n```rust\nfn a()")).count(), 1);
+        assert_eq!(
+            log.iter()
+                .filter(|p| p.contains("\n\n```rust\nfn a()"))
+                .count(),
+            1
+        );
     }
 
     #[test]
