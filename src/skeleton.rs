@@ -146,6 +146,7 @@ pub fn parse(file: &Path, source: &str) -> Result<Graph, SkeletonError> {
                 }
             }
             Item::Mod(m) if has_attr(&m.attrs, "cfg", Some("test")) => {
+                let bench = m.ident == "benches";
                 for it in m.content.iter().flat_map(|(_, items)| items) {
                     if let Item::Fn(f) = it {
                         if !has_attr(&f.attrs, "test", None) {
@@ -154,15 +155,20 @@ pub fn parse(file: &Path, source: &str) -> Result<Graph, SkeletonError> {
                         let (signature, body) = split_fn(&text, &f.sig, &f.block);
                         let (signature, body) = (dedent(&signature), body.map(|b| dedent(&b)));
                         let name = f.sig.ident.to_string();
-                        let id = if name.starts_with("test::") {
+                        let prefix = if bench { "bench::" } else { "test::" };
+                        let id = if name.starts_with(prefix) {
                             name
                         } else {
-                            format!("test::{name}")
+                            format!("{prefix}{name}")
                         };
                         push(
                             &mut graph,
                             id,
-                            NodeKind::Test,
+                            if bench {
+                                NodeKind::Bench
+                            } else {
+                                NodeKind::Test
+                            },
                             format!("#[test] {signature}"),
                             Some(body.unwrap_or_else(|| dedent(&text.block(&f.block)))),
                             None,
@@ -480,6 +486,33 @@ impl Default for Foo {
         );
         assert_eq!(g.tests_for(&id("filled")), vec![&id("test::goes")]);
         assert!(g.tests_for(&id("Foo::go")).is_empty());
+    }
+
+    #[test]
+    fn bench_module_round_trips() {
+        let src = format!(
+            "{SRC}\n#[cfg(test)]\nmod tests {{\n    use super::*;\n\n    #[test]\n    fn goes() {{\n        make(1);\n    }}\n}}\n\n#[cfg(test)]\nmod benches {{\n    use super::*;\n\n    #[test]\n    fn speed() {{\n        filled();\n    }}\n}}\n"
+        );
+        let g = parse(Path::new("a.rs"), &src).unwrap();
+        let b = &g.nodes[&id("bench::speed")];
+        assert_eq!(b.kind, NodeKind::Bench);
+        assert_eq!(b.signature, "#[test] fn speed()");
+        assert!(b.body.is_some());
+        assert_eq!(g.nodes[&id("test::goes")].kind, NodeKind::Test);
+        assert_eq!(
+            g.dependencies(&id("bench::speed")).collect::<Vec<_>>(),
+            vec![&id("filled")]
+        );
+        let text = crate::assemble::assemble(&g)
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(text.find("mod tests").unwrap() < text.find("mod benches").unwrap());
+        let g2 = parse(Path::new("a.rs"), &text).unwrap();
+        assert_eq!(g2.nodes, g.nodes);
+        assert_eq!(g2.uses, g.uses);
     }
 
     #[test]

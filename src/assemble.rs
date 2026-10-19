@@ -22,6 +22,7 @@ pub fn assemble(graph: &Graph) -> Assembled {
     let mut per_file: BTreeMap<&Path, Vec<Item>> = BTreeMap::new();
     let mut impls: BTreeMap<(&Path, &str), Vec<&Node>> = BTreeMap::new();
     let mut tests: BTreeMap<&Path, Vec<&Node>> = BTreeMap::new();
+    let mut benches: BTreeMap<&Path, Vec<&Node>> = BTreeMap::new();
 
     for node in graph.nodes.values() {
         let file = node.placement.file.as_path();
@@ -29,6 +30,10 @@ pub fn assemble(graph: &Graph) -> Assembled {
             (NodeKind::Test, _) => {
                 per_file.entry(file).or_default();
                 tests.entry(file).or_default().push(node)
+            }
+            (NodeKind::Bench, _) => {
+                per_file.entry(file).or_default();
+                benches.entry(file).or_default().push(node)
             }
             (NodeKind::Method, Some(header)) => {
                 impls.entry((file, header.as_str())).or_default().push(node)
@@ -85,25 +90,30 @@ pub fn assemble(graph: &Graph) -> Assembled {
                 }
             }
         }
-        if let Some(mut group) = tests.remove(file) {
-            group.sort_by(|a, b| (a.placement.index, &a.id).cmp(&(b.placement.index, &b.id)));
-            if !items.is_empty() {
-                out.push('\n');
+        let mut wrote = !items.is_empty();
+        for (name, groups) in [("tests", &mut tests), ("benches", &mut benches)] {
+            if let Some(mut group) = groups.remove(file) {
+                group.sort_by(|a, b| (a.placement.index, &a.id).cmp(&(b.placement.index, &b.id)));
+                if wrote {
+                    out.push('\n');
+                    line += 1;
+                }
+                wrote = true;
+                out.push_str(&format!("#[cfg(test)]\nmod {name} {{\n    use super::*;\n"));
+                line += 3;
+                for node in group {
+                    out.push('\n');
+                    line += 1;
+                    let text = indent(&node.render());
+                    let count = text.lines().count().max(1);
+                    record(&mut spans, node, file, line, line + count - 1);
+                    out.push_str(&text);
+                    out.push('\n');
+                    line += count;
+                }
+                out.push_str("}\n");
                 line += 1;
             }
-            out.push_str("#[cfg(test)]\nmod tests {\n    use super::*;\n");
-            line += 3;
-            for node in group {
-                out.push('\n');
-                line += 1;
-                let text = indent(&node.render());
-                let count = text.lines().count().max(1);
-                record(&mut spans, node, file, line, line + count - 1);
-                out.push_str(&text);
-                out.push('\n');
-                line += count;
-            }
-            out.push_str("}\n");
         }
         files.insert(file.to_path_buf(), out);
     }
@@ -308,6 +318,38 @@ mod tests {
         assert_eq!(lines[s1.start_line - 1], "    #[test] fn one() { todo!() }");
         assert_eq!(lines[s2.end_line - 1], "    }");
         assert_eq!(assemble(&g).files, a.files);
+    }
+
+    #[test]
+    fn renders_benches_module_after_tests() {
+        let mut g = sample();
+        g.insert(node(
+            "t1",
+            NodeKind::Test,
+            "#[test] fn one()",
+            None,
+            None,
+            "a.rs",
+            5,
+        ));
+        g.insert(node(
+            "b1",
+            NodeKind::Bench,
+            "#[test] fn fast()",
+            Some("{\n    f();\n}"),
+            None,
+            "a.rs",
+            6,
+        ));
+        let a = assemble(&g);
+        let text = &a.files[Path::new("a.rs")];
+        let tail = "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test] fn one() { todo!() }\n}\n\n#[cfg(test)]\nmod benches {\n    use super::*;\n\n    #[test] fn fast() {\n        f();\n    }\n}\n";
+        assert!(text.ends_with(tail));
+        let s = &a.spans[&NodeId("b1".into())];
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!((s.start_line, s.end_line), (24, 26));
+        assert_eq!(lines[s.start_line - 1], "    #[test] fn fast() {");
+        assert_eq!(lines[s.end_line - 1], "    }");
     }
 
     #[test]
