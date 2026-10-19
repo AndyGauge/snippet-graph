@@ -1,0 +1,3 @@
+{{- $id := .Get 0 -}}
+{{- $by := partialCached "code/index.html" . -}}
+{{- with index $by $id -}}<a href="{{ printf "code/%s/" .slug | relURL }}"><code>{{ .name }}</code></a>{{- else -}}{{ errorf "node shortcode: no node %q in the graph" $id }}{{- end -}}

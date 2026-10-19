@@ -20,6 +20,21 @@ fn export_graph(graph: &Graph, view: &View, dir: &Path, commit: bool) -> Result<
     if commit && !dir.join(".git").exists() {
         return Err(format!("{} is not a git repository", dir.display()));
     }
+    write_files(graph, dir)?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let manifest = dir.join("Cargo.toml");
+    if !manifest.exists() {
+        std::fs::write(&manifest, MANIFEST).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    }
+    if commit {
+        git(dir, &["add", "-A"])?;
+        let message = format!("view {} (run {})", view.id.0, view.run.0);
+        git(dir, &["commit", "-m", &message])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_files(graph: &Graph, dir: &Path) -> Result<(), String> {
     let assembled = assemble(graph);
     for (rel, text) in &assembled.files {
         if rel
@@ -37,17 +52,43 @@ fn export_graph(graph: &Graph, view: &View, dir: &Path, commit: bool) -> Result<
         }
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let manifest = dir.join("Cargo.toml");
-    if !manifest.exists() {
-        std::fs::write(&manifest, MANIFEST).map_err(|e| format!("{}: {e}", manifest.display()))?;
-    }
-    if commit {
-        git(dir, &["add", "-A"])?;
-        let message = format!("view {} (run {})", view.id.0, view.run.0);
-        git(dir, &["commit", "-m", &message])?;
-    }
     Ok(())
+}
+
+/// Commit everything staged in `dir`, if anything changed. Returns whether a
+/// commit was made.
+pub(crate) fn commit_all(dir: &Path, message: &str) -> Result<bool, String> {
+    git(dir, &["add", "-A"])?;
+    let clean = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("git diff: {e}"))?
+        .success();
+    if clean {
+        return Ok(false);
+    }
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=sg",
+            "-c",
+            "user.email=sg@localhost",
+            "commit",
+            "-m",
+            message,
+        ],
+    )?;
+    Ok(true)
+}
+
+pub(crate) fn init_repo(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if dir.join(".git").exists() {
+        return Ok(());
+    }
+    git(dir, &["init", "-q"])
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<(), String> {

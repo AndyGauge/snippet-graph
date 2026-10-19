@@ -1,0 +1,57 @@
+baseURL = "/"
+relativeURLs = true
+locale = "en"
+title = "snippet-graph"
+disableKinds = ["taxonomy", "term", "RSS"]
+enableRobotsTXT = false
+
+[params]
+  description = "Write code the way people do: one small piece at a time, with the compiler and the tests checking each step."
+
+[markup.goldmark.renderer]
+  unsafe = true
+
+[markup.highlight]
+  noClasses = false
+  style = "github"
+
+[[menus.main]]
+  name = "Use it"
+  pageRef = "/use-it"
+  weight = 5
+[[menus.main]]
+  name = "How it works"
+  pageRef = "/how-it-works"
+  weight = 10
+[[menus.main]]
+  name = "History"
+  pageRef = "/history"
+  weight = 20
+[[menus.main]]
+  name = "Failures"
+  pageRef = "/failures"
+  weight = 30
+[[menus.main]]
+  name = "Review"
+  pageRef = "/review"
+  weight = 40
+[[menus.main]]
+  name = "Handoff"
+  pageRef = "/handoff"
+  weight = 50
+[[menus.main]]
+  name = "Code"
+  pageRef = "/code"
+  weight = 55
+[[menus.main]]
+  name = "How it is read"
+  pageRef = "/tour"
+  weight = 58
+[[menus.main]]
+  name = "Results"
+  pageRef = "/results"
+  weight = 60
+[[menus.main]]
+  name = "FAQ"
+  pageRef = "/faq"
+  weight = 70

@@ -1,0 +1,11 @@
+{
+  "title": "Commission module: five runs of the same spec",
+  "note": "One spec, five runs of the tool as it stood at the time. Not a controlled comparison: one sample each, and the tool changed between runs.",
+  "runs": [
+    {"id": "A", "build": "before the keep-best-body fix (laptop)", "retries": 79, "minutes": 44.3, "result": "failed", "detail": "13 of 18 tests failing; four functions left as todo!()"},
+    {"id": "B", "build": "after the fix (laptop)", "retries": 5, "minutes": 9.6, "result": "passed", "detail": "all 20 tests and the hand-written checks pass"},
+    {"id": "C", "build": "doc comments and handoff (spark)", "retries": 45, "minutes": 29.1, "result": "passed", "detail": "all tests and the hand-written checks pass"},
+    {"id": "D", "build": "per-function attempt budget (spark)", "retries": 19, "minutes": 22.7, "result": "failed", "detail": "4 tests failing; blame was charging a correct function for a stub elsewhere"},
+    {"id": "E", "build": "blame fix (spark)", "retries": 2, "minutes": 6.8, "result": "passed", "detail": "all 20 tests and the hand-written checks pass"}
+  ]
+}

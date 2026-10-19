@@ -1,0 +1,7 @@
+{{- $by := partialCached "code/index.html" . -}}
+{{- if .items -}}
+<h3>{{ .title }}</h3>
+<ul class="edges">
+{{- range .items }}{{ with index $by .id }}{{ partial "code/link.html" (dict "node" . "possible" $.possible) }}{{ end }}{{ end }}
+</ul>
+{{- end -}}

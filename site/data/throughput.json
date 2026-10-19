@@ -1,0 +1,17 @@
+{
+  "title": "Tokens per second in total, by simultaneous requests",
+  "note": "One DGX Spark (GB10, 121 GB unified memory), llama.cpp. Total across streams; per-stream speed in the tooltip. A blank means that level was not run. Requests beyond the slot count wait, so a total stops growing there.",
+  "streams": [1, 2, 4, 8, 16],
+  "series": [
+    {"id": "gpt2", "name": "gpt-oss-120b, 2 slots", "emphasis": true, "slot": 1, "total": [54, 73, 72, 74, null], "perStream": [54.1, 36.5, 27.2, 19.3, null]},
+    {"id": "gpt8", "name": "gpt-oss-120b, 8 slots", "emphasis": true, "slot": 2, "total": [54, 72, 97, 110, 112], "perStream": [53.6, 36.0, 24.2, 13.8, 10.3]},
+    {"id": "cn8", "name": "Coder-Next, 8 slots", "emphasis": true, "slot": 3, "total": [53, 81, 116, 176, 163], "perStream": [53.2, 41.0, 29.8, 22.6, 15.9]},
+    {"id": "q27", "name": "Qwen3.8-27B (dense), 4 slots", "emphasis": false, "total": [10, 18, 31, 32, null], "perStream": [10.0, 9.0, 7.8, 5.9, null]}
+  ],
+  "also": [
+    {"name": "Coder-Next, Q4_K_XL file, 4 slots", "total": [54, 79, 118, 114, null]},
+    {"name": "Coder-Next, Q4_K_XL file, 8 slots", "total": [54, 79, 113, 161, 154]},
+    {"name": "Coder-Next, MXFP4 file, 4 slots", "total": [52, 80, 116, 113, 110]},
+    {"name": "Coder-Next, MXFP4 file, 8 slots", "total": [55, 81, 120, 169, 152]}
+  ]
+}

@@ -1,0 +1,11 @@
+{{ define "main" }}
+<section class="hero">
+  <div class="wrap">
+    <h1>{{ .Title }}</h1>
+    <p class="lead">{{ .Params.lead }}</p>
+  </div>
+</section>
+<div class="wrap prose">
+  {{ .Content }}
+</div>
+{{ end }}

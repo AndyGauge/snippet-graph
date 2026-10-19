@@ -89,6 +89,7 @@ fn fill_parallel_impl(
         filled: Vec::new(),
         failed: Vec::new(),
         retries: BTreeMap::new(),
+        rollbacks: BTreeMap::new(),
     };
     let levels = match crate::order::levels(graph) {
         Ok(levels) => levels,
@@ -103,6 +104,7 @@ fn fill_parallel_impl(
                     .nodes
                     .get(id)
                     .is_some_and(|n| !n.is_filled() && n.kind != NodeKind::Test)
+                    && !graph.exhausted(id)
             })
             .map(|id| (id, Vec::new()))
             .collect();
@@ -129,6 +131,7 @@ fn fill_parallel_impl(
                     if let Some(node) = graph.nodes.get_mut(id) {
                         node.body = Some(body.clone());
                         generated = true;
+                        graph.spend(id);
                     }
                 }
             }
@@ -171,7 +174,7 @@ fn fill_parallel_impl(
                 };
                 if errs.is_empty() {
                     done.push(id);
-                } else if round == max_retries {
+                } else if round == max_retries || graph.exhausted(&id) {
                     if let Some(node) = graph.nodes.get_mut(&id) {
                         node.body = None;
                     }

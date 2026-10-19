@@ -86,6 +86,29 @@ pub fn swap(
     ))
 }
 
+/// A new view equal to `view` except each listed node uses its listed version;
+/// its parent is `view`. Err when a node is not in the view.
+pub fn swap_many(
+    view: &View,
+    swaps: &[(NodeId, VersionId)],
+    created_ms: u64,
+) -> Result<View, StoreError> {
+    let mut versions = view.versions.clone();
+    for (node, version) in swaps {
+        if !versions.contains_key(node) {
+            return Err(StoreError::NotFound(node.0.clone()));
+        }
+        versions.insert(node.clone(), version.clone());
+    }
+    Ok(View::new(
+        view.run.clone(),
+        Some(view.id.clone()),
+        versions,
+        view.uses.clone(),
+        created_ms,
+    ))
+}
+
 /// The view `view` derives from, if any.
 pub fn undo(store: &dyn Store, view: &View) -> Result<Option<View>, StoreError> {
     view.parent.as_ref().map(|p| store.get_view(p)).transpose()

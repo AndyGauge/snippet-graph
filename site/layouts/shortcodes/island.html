@@ -1,0 +1,7 @@
+{{- $name := .Get "name" -}}
+{{- $data := .Get "data" -}}
+{{- $label := .Get "label" -}}
+<div class="island" data-island="{{ $name }}"{{ with $data }} data-props="{{ printf "%s" (index hugo.Data . | jsonify) }}"{{ end }} role="group" aria-label="{{ $label }}">
+{{- with $data }}<noscript>{{ partial (printf "tables/%s.html" .) (index hugo.Data .) }}</noscript>{{ end -}}
+{{- if not $data }}<noscript><p>This part is interactive and needs JavaScript. The page text above says the same thing in words.</p></noscript>{{ end -}}
+</div>

@@ -7,6 +7,9 @@ pub struct Suspect {
     pub score: f64,
 }
 
+/// A test that fails by reaching a `todo!()` says a dependency is unfilled, not that
+/// anything it touches is wrong; unfilled nodes are refilled by the fill pass itself.
+const UNFILLED_PANIC: &str = "not yet implemented";
 const RECENT_BONUS: f64 = 0.5;
 const PASSING_PENALTY: f64 = 1.0;
 
@@ -19,6 +22,9 @@ const PASSING_PENALTY: f64 = 1.0;
 pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId]) -> Vec<Suspect> {
     let mut reach: BTreeMap<&NodeId, (usize, usize)> = BTreeMap::new();
     for outcome in outcomes {
+        if !outcome.passed && outcome.message.contains(UNFILLED_PANIC) {
+            continue;
+        }
         for subject in graph.subjects_of(&outcome.test) {
             let fillable = graph
                 .nodes
@@ -72,8 +78,15 @@ pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId])
 
 /// The suspects to retry together in one repair round: those that do not depend
 /// on another suspect, in rank order, at most `limit`. Falls back to the top
-/// suspect when every suspect depends on another (a cycle).
+/// suspect when every suspect depends on another (a cycle). Nodes whose attempt
+/// budget is spent are never chosen.
 pub fn repair_targets(graph: &Graph, suspects: &[Suspect], limit: usize) -> Vec<NodeId> {
+    let live: Vec<Suspect> = suspects
+        .iter()
+        .filter(|s| !graph.exhausted(&s.node))
+        .cloned()
+        .collect();
+    let suspects = live.as_slice();
     let ids: std::collections::BTreeSet<&NodeId> = suspects.iter().map(|s| &s.node).collect();
     let mut targets: Vec<NodeId> = suspects
         .iter()
@@ -223,6 +236,23 @@ mod tests {
         let ranked = rank(&g, &[out("t_caller", false), out("t_helper", false)], &[]);
         assert_eq!(ranked[0].node, id("helper"));
         assert_eq!(ranked[1].node, id("caller"));
+    }
+
+    #[test]
+    fn failures_that_hit_an_unfilled_todo_blame_no_one() {
+        let g = graph(&[("t_top", &["top", "helper"])]);
+        let todo = TestOutcome {
+            test: id("t_top"),
+            passed: false,
+            message: "thread 't' panicked at src/lib.rs:9:5:\nnot yet implemented".into(),
+        };
+        assert!(rank(&g, &[todo], &[]).is_empty());
+        let wrong = TestOutcome {
+            test: id("t_top"),
+            passed: false,
+            message: "assertion failed".into(),
+        };
+        assert_eq!(rank(&g, &[wrong], &[]).len(), 2);
     }
 
     #[test]

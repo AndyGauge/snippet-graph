@@ -8,10 +8,19 @@ pub trait Generator {
     fn generate(&mut self, prompt: &str) -> Result<String, String>;
 }
 
+/// A repeated answer costs nothing, but an unbroken run of them this long is a
+/// stuck model, and the next repeat counts as a retry.
+const MAX_CONSECUTIVE_REPEATS: usize = 20;
+const REPEAT_NOTE: &str =
+    "That exact body was already tried and failed this way. Write a different implementation.";
+
 pub struct Outcome {
     pub filled: Vec<NodeId>,
     pub failed: Vec<(NodeId, String)>,
     pub retries: BTreeMap<NodeId, usize>,
+    /// Attempts that repeated an earlier answer for the same node. They reuse
+    /// the earlier result and cost neither a retry nor budget.
+    pub rollbacks: BTreeMap<NodeId, usize>,
 }
 
 /// Prompt for one node: its own signature plus the signatures (never bodies) of
@@ -35,7 +44,7 @@ pub fn build_prompt(graph: &Graph, id: &NodeId, prior_errors: &[String]) -> Stri
             .filter_map(|d| graph.nodes.get(d))
             .collect();
         if !deps.is_empty() {
-            out.push_str("\nAvailable items it may use (signatures only):\n```rust\n");
+            out.push_str("\nAvailable items it may use (signatures and doc comments only):\n```rust\n");
             for dep in deps {
                 if let Some(header) = &dep.impl_header {
                     out.push_str(&format!("// in {header}\n"));
@@ -45,6 +54,18 @@ pub fn build_prompt(graph: &Graph, id: &NodeId, prior_errors: &[String]) -> Stri
             }
             out.push_str("```\n");
         }
+    }
+    out.push_str(&format!(
+        "\nIf this function needs several distinct steps (filtering, grouping, summing and so on), implement it anyway but make the first line of the body `{}: <the steps that should be separate functions>`.\n",
+        crate::structure::MARKER_PREFIX
+    ));
+    let reason = graph.refactor.get(id).cloned().or_else(|| {
+        crate::structure::test_load(graph, id).map(|f| f.detail)
+    });
+    if let Some(reason) = reason {
+        out.push_str(&format!(
+            "\nThis function was judged too large ({reason}). Do not write one long body. Put each distinct step in its own small nested `fn` inside the body, and keep the outer body a short sequence of calls to them.\n"
+        ));
     }
     if !prior_errors.is_empty() {
         out.push_str("\nYour previous attempt failed with these errors; fix them:\n");
@@ -189,6 +210,7 @@ pub fn fill_all(
         filled: Vec::new(),
         failed: Vec::new(),
         retries: BTreeMap::new(),
+        rollbacks: BTreeMap::new(),
     };
     let order = match crate::order::topological(graph) {
         Ok(order) => order,
@@ -210,6 +232,7 @@ pub fn fill_all(
             match attempt {
                 Err(e) => errors = vec![e],
                 Ok(body) => {
+                    graph.spend(&id);
                     if let Some(node) = graph.nodes.get_mut(&id) {
                         node.body = Some(body);
                     }
@@ -444,6 +467,7 @@ fn fill_tested_impl(
         filled: Vec::new(),
         failed: Vec::new(),
         retries: BTreeMap::new(),
+        rollbacks: BTreeMap::new(),
     };
     let order = match crate::order::topological(graph) {
         Ok(order) => order,
@@ -455,8 +479,16 @@ fn fill_tested_impl(
             Some(node) if !node.is_filled() && node.kind != NodeKind::Test => {}
             _ => continue,
         }
+        if graph.exhausted(&id) {
+            outcome
+                .failed
+                .push((id.clone(), "attempt budget spent".to_string()));
+            continue;
+        }
         let mut target = id.clone();
         let mut errors: Vec<String> = Vec::new();
+        let mut seen: BTreeMap<(NodeId, String), (NodeId, Vec<String>)> = BTreeMap::new();
+        let mut streak = 0;
         loop {
             let shown = match rec.as_mut() {
                 Some(r) => r.prompt_errors(&target, &errors)?,
@@ -467,9 +499,27 @@ fn fill_tested_impl(
                 extract_body(&r).ok_or_else(|| "no `{ ... }` block in response".to_string())
             });
             let mut next: Option<(NodeId, Vec<String>)> = None;
+            let attempted = target.clone();
+            let mut attempted_body: Option<String> = None;
+            let mut rolled_back = false;
             match attempt {
                 Err(e) => next = Some((target.clone(), vec![e])),
+                Ok(body) if seen.contains_key(&(target.clone(), body.clone())) => {
+                    next = seen.get(&(target.clone(), body)).cloned();
+                    if streak < MAX_CONSECUTIVE_REPEATS {
+                        streak += 1;
+                        *graph.rolled_back.entry(target.clone()).or_default() += 1;
+                        *outcome.rollbacks.entry(target.clone()).or_default() += 1;
+                        rolled_back = true;
+                        if let Some((_, errs)) = next.as_mut() {
+                            errs.push(REPEAT_NOTE.to_string());
+                        }
+                    }
+                }
                 Ok(body) => {
+                    streak = 0;
+                    attempted_body = Some(body.clone());
+                    graph.spend(&target);
                     if let Some(node) = graph.nodes.get_mut(&target) {
                         node.body = Some(body);
                     }
@@ -509,13 +559,19 @@ fn fill_tested_impl(
                 outcome.filled.push(id.clone());
                 break;
             };
+            if let Some(body) = attempted_body {
+                seen.insert((attempted, body), (t.clone(), errs.clone()));
+            }
             if let Some(r) = rec.as_mut() {
                 r.note_failures(&t, &errs);
             }
             target = t;
             errors = errs;
+            if rolled_back {
+                continue;
+            }
             let used = outcome.retries.get(&target).copied().unwrap_or(0);
-            if used >= max_retries {
+            if used >= max_retries || graph.exhausted(&target) {
                 if let Some(node) = graph.nodes.get_mut(&target) {
                     node.body = None;
                 }
@@ -587,6 +643,36 @@ mod tests {
     fn extract_unbalanced_is_none() {
         assert!(extract_body("{ oops").is_none());
         assert!(extract_body("no braces").is_none());
+    }
+
+    #[test]
+    fn prompt_always_offers_the_marker_and_asks_for_a_restructure_when_flagged() {
+        let mut g = Graph::default();
+        g.insert(func("a", "fn a() -> u32"));
+        let plain = build_prompt(&g, &nid("a"), &[]);
+        assert!(plain.contains("// TODO: does too much:"));
+        assert!(!plain.contains("judged too large"));
+        g.refactor
+            .insert(nid("a"), "complexity 12 (limit 8)".to_string());
+        let flagged = build_prompt(&g, &nid("a"), &[]);
+        assert!(flagged.contains("judged too large (complexity 12 (limit 8))"));
+        assert!(flagged.contains("nested `fn`"));
+    }
+
+    #[test]
+    fn prompt_asks_for_a_restructure_when_many_tests_reach_the_function() {
+        let mut g = Graph::default();
+        g.insert(func("a", "fn a() -> u32"));
+        for i in 0..6 {
+            let name = format!("a_case{i}");
+            let mut t = func(&name, &format!("#[test] fn {name}()"));
+            t.kind = NodeKind::Test;
+            t.body = Some("{}".into());
+            g.insert(t);
+            g.add_use(&nid(&name), &nid("a"));
+        }
+        let p = build_prompt(&g, &nid("a"), &[]);
+        assert!(p.contains("6 tests written for it (limit 5)"));
     }
 
     #[test]
@@ -694,6 +780,105 @@ mod tests {
             calls,
             vec![vec![nid("t_a")], vec![nid("t_a")], vec![nid("t_b")]]
         );
+    }
+
+    fn repeating_generator(answers: &[&str]) -> Fake {
+        Fake(
+            answers.iter().map(|a| Ok(format!("{{ {a} }}"))).collect(),
+            Vec::new(),
+        )
+    }
+
+    fn one_node_with_test() -> Graph {
+        let mut g = Graph::default();
+        g.insert(func("a", "fn a()"));
+        let mut ta = func("t_a", "#[test] fn t_a()");
+        ta.kind = NodeKind::Test;
+        ta.body = Some("{}".into());
+        g.insert(ta);
+        g.add_use(&nid("t_a"), &nid("a"));
+        g
+    }
+
+    fn run_fails_on_wrong(runs: &mut usize) -> impl FnMut(&Graph, &[NodeId]) -> TestReport + '_ {
+        move |g: &Graph, tests: &[NodeId]| {
+            *runs += 1;
+            let wrong = g.nodes[&nid("a")]
+                .body
+                .as_deref()
+                .unwrap_or("")
+                .contains("wrong");
+            TestReport {
+                compiled: true,
+                outcomes: tests
+                    .iter()
+                    .map(|t| TestOutcome {
+                        test: t.clone(),
+                        passed: !wrong,
+                        message: "expected 1, got 2".into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_answer_is_a_rollback_not_a_retry() {
+        let mut g = one_node_with_test();
+        let mut gen = repeating_generator(&["wrong", "wrong", "wrong", "right"]);
+        let mut runs = 0;
+        let out = fill_all_tested(&mut g, &mut gen, &mut run_fails_on_wrong(&mut runs), 4);
+        assert!(out.failed.is_empty());
+        assert_eq!(out.retries[&nid("a")], 1);
+        assert_eq!(out.rollbacks[&nid("a")], 2);
+        assert_eq!(runs, 2);
+    }
+
+    #[test]
+    fn repeats_are_free_and_tell_the_model_so() {
+        let mut g = one_node_with_test();
+        let mut gen = repeating_generator(&["wrong", "wrong", "wrong", "wrong", "wrong", "right"]);
+        let mut runs = 0;
+        let out = fill_all_tested(&mut g, &mut gen, &mut run_fails_on_wrong(&mut runs), 1);
+        assert!(out.failed.is_empty());
+        assert_eq!(out.rollbacks[&nid("a")], 4);
+        assert_eq!(out.retries[&nid("a")], 1);
+        assert!(gen.1[2].contains("already tried"));
+        assert!(!gen.1[1].contains("already tried"));
+    }
+
+    #[test]
+    fn a_stuck_model_is_stopped_after_a_long_run_of_repeats() {
+        let mut g = one_node_with_test();
+        let answers = vec!["wrong"; 60];
+        let mut gen = repeating_generator(&answers);
+        let mut runs = 0;
+        let out = fill_all_tested(&mut g, &mut gen, &mut run_fails_on_wrong(&mut runs), 2);
+        assert_eq!(out.rollbacks[&nid("a")], MAX_CONSECUTIVE_REPEATS);
+        assert_eq!(out.failed.len(), 1);
+        assert!(g.nodes[&nid("a")].body.is_none());
+    }
+
+    #[test]
+    fn attempt_budget_is_spent_across_passes() {
+        let mut g = one_node_with_test();
+        g.budget = 3;
+        let mut gen = repeating_generator(&["wrong 1", "wrong 2"]);
+        let mut runs = 0;
+        let first = fill_all_tested(&mut g, &mut gen, &mut run_fails_on_wrong(&mut runs), 1);
+        assert_eq!(first.failed.len(), 1);
+        assert_eq!(g.spent[&nid("a")], 2);
+        let mut gen = repeating_generator(&["wrong 3", "right"]);
+        let second = fill_all_tested(&mut g, &mut gen, &mut run_fails_on_wrong(&mut runs), 5);
+        assert_eq!(g.spent[&nid("a")], 3);
+        assert_eq!(second.failed.len(), 1);
+        assert!(g.exhausted(&nid("a")));
+        let mut gen = repeating_generator(&["right"]);
+        let third = fill_all_tested(&mut g, &mut gen, &mut run_fails_on_wrong(&mut runs), 5);
+        assert!(third.filled.is_empty());
+        assert_eq!(third.failed.len(), 1);
+        assert!(gen.1.is_empty());
     }
 
     #[test]

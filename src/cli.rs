@@ -1,4 +1,5 @@
 use crate::export::export_view;
+use crate::ledger::{self, Status};
 use crate::model::{Graph, NodeId, NodeKind, TestOutcome, TestReport};
 use crate::variants::TournamentReport;
 use crate::version::{Store, VersionId, View, ViewId};
@@ -348,6 +349,98 @@ pub fn format_report(report: &TournamentReport) -> String {
         _ => out.push_str("no variant beat the baseline\n"),
     }
     out
+}
+
+fn version_label(node: &NodeId, version: &VersionId) -> String {
+    format!("{}@{}", node.0, short(&version.0))
+}
+
+/// The failure ledger as text, optionally for one node and optionally only the
+/// failures still open.
+pub fn failures(store: &dyn Store, node: Option<&NodeId>, open_only: bool) -> Result<String, String> {
+    let all = ledger::ledger(store).map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    for f in all
+        .iter()
+        .filter(|f| !open_only || f.is_open())
+        .filter(|f| node.is_none_or(|n| f.versions.contains_key(n) || &f.test == n))
+    {
+        let seen: Vec<String> = f
+            .versions
+            .iter()
+            .flat_map(|(n, vs)| vs.iter().map(move |v| version_label(n, v)))
+            .collect();
+        let state = match &f.status {
+            Status::Open => "open".to_string(),
+            Status::Resolved { by, in_view } => format!(
+                "resolved in view {}{}",
+                short(&in_view.0),
+                if by.is_empty() {
+                    " with no version change".to_string()
+                } else {
+                    " by a new version".to_string()
+                }
+            ),
+        };
+        let _ = writeln!(
+            out,
+            "{} [{state}] {}: {} (seen {} times)\n    versions: {}",
+            short(&f.id),
+            f.test.0,
+            f.summary,
+            f.occurrences,
+            seen.join(", ")
+        );
+    }
+    if out.is_empty() {
+        out.push_str("no failures\n");
+    }
+    Ok(out)
+}
+
+/// The newest version of a node that compiled, and whether its tests passed.
+pub fn good(store: &dyn Store, node: &NodeId) -> Result<String, String> {
+    match ledger::last_good(store, node).map_err(|e| e.to_string())? {
+        None => Ok(format!("{}: no version has compiled\n", node.0)),
+        Some(g) => Ok(format!(
+            "{}: {} in view {} ({})\n",
+            node.0,
+            short(&g.version.0),
+            short(&g.view.0),
+            match (g.passing, g.tested) {
+                (true, true) => "compiled, tests pass",
+                (true, false) => "compiled, no test reaches it",
+                (false, _) => "compiled, tests fail",
+            }
+        )),
+    }
+}
+
+/// Move every function with an open failure, or no body, back to its last good
+/// version. With `apply` false only the plan is returned.
+pub fn sweep(
+    store: &mut dyn Store,
+    view: &str,
+    apply: bool,
+    created_ms: u64,
+) -> Result<(String, Option<ViewId>), String> {
+    let id = resolve_view(store, view)?;
+    let base = store.get_view(&id).map_err(|e| e.to_string())?;
+    let plan = ledger::sweep_plan(store, &base).map_err(|e| e.to_string())?;
+    if plan.is_empty() {
+        return Ok(("nothing to sweep\n".to_string(), None));
+    }
+    let mut out = String::new();
+    for (node, version) in &plan {
+        let _ = writeln!(out, "{} -> {}", node.0, short(&version.0));
+    }
+    if !apply {
+        return Ok((out, None));
+    }
+    let swapped = view::swap_many(&base, &plan, created_ms).map_err(|e| e.to_string())?;
+    let new = store.put_view(swapped).map_err(|e| e.to_string())?;
+    let _ = writeln!(out, "new view {}", short(&new.0));
+    Ok((out, Some(new)))
 }
 
 #[cfg(test)]

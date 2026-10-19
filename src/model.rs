@@ -47,6 +47,29 @@ pub struct Graph {
     /// Nodes that already exist and must never be refilled or blamed.
     #[serde(default)]
     pub frozen: BTreeSet<NodeId>,
+    /// Why a node's earlier attempt was judged too large; its next prompt asks for a restructure.
+    #[serde(default)]
+    pub refactor: BTreeMap<NodeId, String>,
+    /// How many distinct attempts any one node may use over the whole run, across
+    /// every pass; 0 means unlimited.
+    #[serde(default)]
+    pub budget: usize,
+    /// Distinct attempts used so far per node.
+    #[serde(default)]
+    pub spent: BTreeMap<NodeId, usize>,
+    /// Repeats of an earlier answer per node; free, but capped at half the budget.
+    #[serde(default)]
+    pub rolled_back: BTreeMap<NodeId, usize>,
+}
+
+impl Graph {
+    pub fn exhausted(&self, id: &NodeId) -> bool {
+        self.budget > 0 && self.spent.get(id).copied().unwrap_or(0) >= self.budget
+    }
+
+    pub fn spend(&mut self, id: &NodeId) {
+        *self.spent.entry(id.clone()).or_default() += 1;
+    }
 }
 
 impl Node {

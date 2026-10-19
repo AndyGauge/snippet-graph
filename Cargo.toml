@@ -2,16 +2,26 @@
 name = "snippet-graph"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
+description = "Build Rust code one function at a time: a compiling skeleton, tests first, repair of the function the tests blame, and a stored history of every attempt."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/andygauge/snippet-graph"
+readme = "README.md"
+keywords = ["llm", "code-generation", "testing", "agents", "rust"]
+categories = ["development-tools"]
+exclude = ["site/", ".github/", "docs/"]
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-syn = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+syn = { version = "2", features = ["full", "visit"] }
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-inference-providers = { path = "../inference-providers" }
 
 [[bin]]
 name = "sg"
 path = "src/bin/sg.rs"
+
+[workspace]
+members = ["sg-provider-openai"]

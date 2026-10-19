@@ -1,0 +1,12 @@
+{{ define "main" }}
+<article class="wrap prose">
+  <header>
+    <h1>{{ .Title }}</h1>
+    {{ with .Params.lead }}<p class="lead">{{ . }}</p>{{ end }}
+  </header>
+  {{ .Content }}
+  {{ $nodes := hugo.Data.graph.nodes }}
+  <p class="muted">{{ len $nodes }} nodes and {{ len hugo.Data.graph.edges }} edges across {{ len hugo.Data.graph.crates }} crates, read from the source by <code>sg graph</code> at commit <code>{{ substr hugo.Data.repo.commit 0 7 }}</code>.</p>
+  {{ partial "explorer.html" . }}
+</article>
+{{ end }}

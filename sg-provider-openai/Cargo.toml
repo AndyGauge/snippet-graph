@@ -1,0 +1,16 @@
+[package]
+name = "sg-provider-openai"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A snippet-graph provider for any OpenAI-compatible chat endpoint (llama.cpp, vLLM, hosted APIs)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/andygauge/snippet-graph"
+readme = "README.md"
+keywords = ["llm", "openai", "snippet-graph"]
+categories = ["development-tools"]
+
+[dependencies]
+snippet-graph = { version = "0.1.0", path = ".." }
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"

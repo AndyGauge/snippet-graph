@@ -1,15 +1,19 @@
-use inference_providers::config::Config;
-use inference_providers::{InferenceRequest, ModelTier, Registry};
 use snippet_graph::assemble::assemble;
 use snippet_graph::bench::{self, BenchConfig};
 use snippet_graph::benchgen;
 use snippet_graph::blame;
 use snippet_graph::cli;
 use snippet_graph::fill::{fill_all_versioned, Generator};
+use snippet_graph::handoff;
+use snippet_graph::structure;
 use snippet_graph::import::write_back;
+use snippet_graph::ledger;
 use snippet_graph::lintfix;
 use snippet_graph::metrics::RunMetrics;
+use snippet_graph::repo_graph;
+use snippet_graph::review;
 use snippet_graph::parallel::fill_parallel_versioned;
+use snippet_graph::plugin::{self, Plugin, PluginGenerator};
 use snippet_graph::skeleton;
 use snippet_graph::store::DirStore;
 use snippet_graph::testgen;
@@ -21,7 +25,7 @@ use snippet_graph::{Graph, NodeId, NodeKind, TestReport};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,79 +35,30 @@ const TESTGEN_RETRIES: usize = 3;
 const REPAIR_ROUNDS: usize = 4;
 const LINT_PRUNE_ROUNDS: usize = 3;
 const MAX_REPAIRS_PER_ROUND: usize = 4;
-const DEFAULT_WIDTH: usize = 4;
-const MAX_TOKENS: u32 = 16000;
+const NODE_ATTEMPT_BUDGET: usize = 10;
 const BENCH_RETRIES: usize = 3;
 const MODEL: &str = "sg";
 const USAGE: &str = "usage:
-  sg [run] <spec.md> <crate_dir> [--oracle file.rs] [--width N] [--resume sg-state.json] [--store DIR]
+  sg [run] <spec.md> <crate_dir> [--oracle file.rs] [--width N] [--resume sg-state.json] [--prelude file.rs] [--store DIR] [--handoff DIR] [--no-review] [--provider NAME] [--provider-args ARGS]
   sg history <store> [--node ID]
   sg diff <store> <a> <b>
+  sg graph [--out FILE] [--root DIR] <crate_dir>...
+  sg failures <store> [--node ID] [--open]
+  sg good <store> <node>
+  sg sweep <store> <view> [--dry-run]
   sg undo <store> <view>
   sg swap <store> <view> <node> <version>
   sg export <store> <view> <dir> [--commit]
   sg ab <store> <view> <node> --spec FILE --crate DIR [--n 4] [--runs 7] [--noise 5] [--width N]
   sg edit <store> <view> <crate_dir> --spec FILE <node ids...>";
 
-#[derive(Default)]
-struct Usage {
-    input: AtomicU64,
-    output: AtomicU64,
-    calls: AtomicU64,
-}
-
-struct RegistryGenerator {
-    registry: Arc<Registry>,
-    slot: Option<usize>,
-    usage: Arc<Usage>,
-}
-
-const SYSTEM: &str = "You are a precise Rust engineer. Output only what is asked, no commentary.";
-
-impl Generator for RegistryGenerator {
-    fn generate(&mut self, prompt: &str) -> Result<String, String> {
-        let mut req = InferenceRequest::new(
-            SYSTEM.into(),
-            prompt.into(),
-            MAX_TOKENS,
-            ModelTier::Heavy,
-            1,
-        );
-        req.slot_hint = self.slot;
-        let started = Instant::now();
-        let response = self.registry.complete(&req).map_err(|e| e.to_string())?;
-        self.usage
-            .input
-            .fetch_add(u64::from(response.input_tokens), Ordering::Relaxed);
-        self.usage
-            .output
-            .fetch_add(u64::from(response.output_tokens), Ordering::Relaxed);
-        let n = self.usage.calls.fetch_add(1, Ordering::Relaxed) + 1;
-        eprintln!(
-            "  model call {n}: {}s, {}+{} tokens",
-            started.elapsed().as_secs(),
-            response.input_tokens,
-            response.output_tokens
-        );
-        Ok(response.text)
-    }
-}
-
 fn strip_fences(text: &str) -> String {
-    let t = text.trim();
-    let Some(rest) = t.strip_prefix("```") else {
-        return t.to_string();
-    };
-    let rest = rest.split_once('\n').map_or("", |(_, body)| body);
-    rest.rsplit_once("```")
-        .map_or(rest, |(body, _)| body)
-        .trim()
-        .to_string()
+    review::unfence(text)
 }
 
 fn skeleton_prompt(spec: &str, prelude: &str, errors: &[String], previous: &str) -> String {
     let mut p = format!(
-        "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Private helpers that need no state must be free functions, not methods taking `&self`; never add a function whose only purpose is to call other functions. Output only Rust source.\n\nSpec:\n{spec}\n"
+        "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Private helpers that need no state must be free functions, not methods taking `&self`; never add a function whose only purpose is to call other functions. Keep each function to one job: if its contract would need more than three separate duties (filtering, ordering, several aggregates, exclusions), split the steps into small private helper functions that it calls. Put a `///` doc comment on every new type and function stating its contract for callers who cannot see the body: what it returns, which inputs it skips or treats specially, and any rounding, ordering or error behaviour from the spec. Output only Rust source.\n\nSpec:\n{spec}\n"
     );
     if !prelude.is_empty() {
         p.push_str(&format!(
@@ -136,16 +91,41 @@ fn with_prelude(prelude: &Graph, mut model: Graph) -> Graph {
     combined
 }
 
+fn build_skeleton(
+    crate_dir: &Path,
+    text: &str,
+    prelude: Option<&Graph>,
+) -> Result<Graph, Vec<String>> {
+    let mut graph = skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| vec![e.to_string()])?;
+    if let Some(prelude) = prelude {
+        graph = with_prelude(prelude, graph);
+    }
+    let report = check_graph(crate_dir, &graph).map_err(|e| vec![e.to_string()])?;
+    if report.ok {
+        Ok(graph)
+    } else {
+        Err(report
+            .by_node
+            .into_values()
+            .flatten()
+            .chain(report.unattributed)
+            .collect())
+    }
+}
+
 fn make_skeleton(
-    gen: &mut RegistryGenerator,
+    gen: &mut PluginGenerator,
     crate_dir: &Path,
     spec: &str,
     prelude: Option<&str>,
-) -> Result<Graph, String> {
+    review_rounds: usize,
+) -> Result<(Graph, Vec<String>), String> {
     let prelude_text = prelude.unwrap_or_default();
     let prelude_graph = match prelude {
-        Some(text) => skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| e.to_string())?,
-        None => Graph::default(),
+        Some(text) => Some(
+            skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| e.to_string())?,
+        ),
+        None => None,
     };
     let mut errors = Vec::new();
     let mut previous = String::new();
@@ -157,26 +137,23 @@ fn make_skeleton(
             &errors,
             &previous,
         ))?);
-        let mut graph = match skeleton::parse(Path::new("src/lib.rs"), &previous) {
-            Ok(g) => g,
-            Err(e) => {
-                errors = vec![e.to_string()];
-                continue;
+        match build_skeleton(crate_dir, &previous, prelude_graph.as_ref()) {
+            Ok(graph) => {
+                let reviewed = review::review_skeleton(
+                    graph,
+                    previous,
+                    spec,
+                    gen,
+                    &mut |text| build_skeleton(crate_dir, text, prelude_graph.as_ref()),
+                    review_rounds,
+                );
+                for note in &reviewed.notes {
+                    eprintln!("skeleton review: {note}");
+                }
+                return Ok((reviewed.graph, reviewed.notes));
             }
-        };
-        if prelude.is_some() {
-            graph = with_prelude(&prelude_graph, graph);
+            Err(e) => errors = e,
         }
-        let report = check_graph(crate_dir, &graph).map_err(|e| e.to_string())?;
-        if report.ok {
-            return Ok(graph);
-        }
-        errors = report
-            .by_node
-            .into_values()
-            .flatten()
-            .chain(report.unattributed)
-            .collect();
     }
     Err(format!(
         "no compiling skeleton after {SKELETON_ATTEMPTS} attempts"
@@ -189,8 +166,12 @@ struct Args {
     oracle: Option<PathBuf>,
     resume: Option<PathBuf>,
     prelude: Option<PathBuf>,
+    handoff: Option<PathBuf>,
     store: Option<PathBuf>,
-    width: usize,
+    width: Option<usize>,
+    provider: Option<String>,
+    provider_args: Option<String>,
+    review: bool,
 }
 
 struct Flags {
@@ -222,6 +203,10 @@ impl Flags {
         Ok(flags)
     }
 
+    fn has(&self, name: &str) -> bool {
+        self.switches.iter().any(|s| s == name)
+    }
+
     fn path(&self, name: &str) -> Option<PathBuf> {
         self.values.get(name).map(PathBuf::from)
     }
@@ -241,10 +226,10 @@ impl Flags {
 fn parse_args(args: Vec<String>) -> Result<Args, String> {
     let flags = Flags::parse(
         args,
-        &["--oracle", "--resume", "--width", "--store", "--prelude"],
-        &[],
+        &["--oracle", "--resume", "--width", "--store", "--prelude", "--handoff", "--provider", "--provider-args"],
+        &["--no-review"],
     )?;
-    let width = flags.number("--width", DEFAULT_WIDTH)?;
+    let width = flags.values.get("--width").map(|_| flags.number("--width", 0usize)).transpose()?;
     let [spec, dir] = <[String; 2]>::try_from(flags.positional.clone())
         .map_err(|_| "expected <spec.md> <crate_dir>".to_string())?;
     Ok(Args {
@@ -253,8 +238,12 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         oracle: flags.path("--oracle"),
         resume: flags.path("--resume"),
         prelude: flags.path("--prelude"),
+        handoff: flags.path("--handoff"),
         store: flags.path("--store"),
         width,
+        provider: flags.values.get("--provider").cloned(),
+        provider_args: flags.values.get("--provider-args").cloned(),
+        review: !flags.has("--no-review"),
     })
 }
 
@@ -296,28 +285,34 @@ fn new_run_id() -> RunId {
     RunId(format!("run-{}", now_ms()))
 }
 
-fn generator_pool(
-    registry: &Arc<Registry>,
-    usage: &Arc<Usage>,
-    width: usize,
-) -> Vec<Box<dyn Generator + Send>> {
+fn generator_pool(plugin: &Arc<Plugin>, width: usize) -> Vec<Box<dyn Generator + Send>> {
     (0..width.max(1))
-        .map(|i| {
-            Box::new(RegistryGenerator {
-                registry: registry.clone(),
-                slot: Some(i),
-                usage: usage.clone(),
-            }) as Box<dyn Generator + Send>
-        })
+        .map(|i| Box::new(plugin.generator(Some(i))) as Box<dyn Generator + Send>)
         .collect()
 }
 
-fn registry_generator(registry: &Arc<Registry>, usage: &Arc<Usage>) -> RegistryGenerator {
-    RegistryGenerator {
-        registry: registry.clone(),
-        slot: None,
-        usage: usage.clone(),
-    }
+/// Start the provider program: `--provider NAME` (or `SG_PROVIDER`), by default `openai`.
+/// `--provider-args` (or `SG_PROVIDER_ARGS`) is passed on as
+/// words.
+fn open_plugin(name: Option<&str>, args: Option<&str>) -> Result<Arc<Plugin>, String> {
+    let name = name
+        .map(str::to_string)
+        .or_else(|| std::env::var("SG_PROVIDER").ok())
+        .unwrap_or_else(|| "openai".to_string());
+    let args: Vec<String> = args
+        .map(str::to_string)
+        .or_else(|| std::env::var("SG_PROVIDER_ARGS").ok())
+        .map(|a| a.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+    let program = plugin::find_provider(&name)?;
+    let p = Plugin::spawn(&program, &args)?;
+    eprintln!(
+        "provider {} ({}), {} channel(s)",
+        p.info.name,
+        program.display(),
+        p.info.channels
+    );
+    Ok(p)
 }
 
 fn save_state(crate_dir: &Path, graph: &Graph) -> Result<(), String> {
@@ -370,9 +365,9 @@ fn run_oracle(crate_dir: &Path, graph: &Graph, oracle: &Path) -> Result<bool, St
 fn run(args: Args) -> Result<bool, String> {
     let started = Instant::now();
     let spec = std::fs::read_to_string(&args.spec).map_err(|e| e.to_string())?;
-    let registry = Arc::new(Registry::from_config(&Config::load()));
-    let usage = Arc::new(Usage::default());
-    let mut gen = registry_generator(&registry, &usage);
+    let plugin = open_plugin(args.provider.as_deref(), args.provider_args.as_deref())?;
+    let mut gen = plugin.generator(None);
+    let width = args.width.unwrap_or(plugin.info.channels.clamp(1, 16));
     let crate_dir = args.crate_dir;
     let store_dir = args.store.unwrap_or_else(|| crate_dir.join(".sg-store"));
     let mut store = DirStore::open(&store_dir).map_err(io)?;
@@ -382,14 +377,16 @@ fn run(args: Args) -> Result<bool, String> {
         Some(path) => Some(std::fs::read_to_string(path).map_err(|e| e.to_string())?),
         None => None,
     };
-    let (mut graph, untested) = match &args.resume {
+    let (mut graph, untested, review_notes) = match &args.resume {
         Some(path) => {
             let mut graph = load_state(path)?;
             graph.spec = spec.clone();
-            (graph, Vec::new())
+            (graph, Vec::new(), Vec::new())
         }
         None => {
-            let mut graph = make_skeleton(&mut gen, &crate_dir, &spec, prelude_text.as_deref())?;
+            let rounds = if args.review { review::MAX_REVIEW_ROUNDS } else { 0 };
+            let (mut graph, review_notes) =
+                make_skeleton(&mut gen, &crate_dir, &spec, prelude_text.as_deref(), rounds)?;
             graph.spec = spec.clone();
             eprintln!("skeleton ok: {} nodes", graph.nodes.len());
             let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
@@ -404,7 +401,7 @@ fn run(args: Args) -> Result<bool, String> {
                 eprintln!("  no tests for {}: {why}", id.0);
             }
             save_state(&crate_dir, &graph)?;
-            (graph, untested)
+            (graph, untested, review_notes)
         }
     };
     let test_count = graph
@@ -415,7 +412,7 @@ fn run(args: Args) -> Result<bool, String> {
     eprintln!("tests ok: {test_count} test nodes");
 
     let first = record_view(&mut store, &graph, &run_id, None)?;
-    let mut generators = generator_pool(&registry, &usage, args.width);
+    let mut generators = generator_pool(&plugin, width);
     let lint = |g: &Graph| -> BTreeMap<NodeId, Vec<String>> {
         let mut assembled = assemble(g);
         for text in assembled.files.values_mut() {
@@ -425,6 +422,7 @@ fn run(args: Args) -> Result<bool, String> {
             .map(|r| r.by_node)
             .unwrap_or_default()
     };
+    graph.budget = NODE_ATTEMPT_BUDGET;
     let (mut outcome, mut current) = fill_parallel_versioned(
         &mut graph,
         &mut generators,
@@ -465,7 +463,29 @@ fn run(args: Args) -> Result<bool, String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        let saved: Vec<(NodeId, String)> = graph
+            .nodes
+            .iter()
+            .filter(|(_, n)| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+            .filter_map(|(id, n)| n.body.clone().map(|b| (id.clone(), b)))
+            .collect();
         for target in &targets {
+            let mut findings = graph
+                .nodes
+                .get(target)
+                .and_then(|n| n.body.as_deref())
+                .map(|b| structure::evaluate_body(target, b))
+                .unwrap_or_default();
+            findings.extend(structure::test_load(&graph, target));
+            match structure::refactor_reason(&findings) {
+                Some(reason) => {
+                    eprintln!("  {} judged too large: {reason}", target.0);
+                    graph.refactor.insert(target.clone(), reason);
+                }
+                None => {
+                    graph.refactor.remove(target);
+                }
+            }
             if let Some(node) = graph.nodes.get_mut(target) {
                 node.body = None;
             }
@@ -516,11 +536,24 @@ fn run(args: Args) -> Result<bool, String> {
             for (id, n) in second.retries {
                 *again.retries.entry(id).or_default() += n;
             }
+            for (id, n) in second.rollbacks {
+                *again.rollbacks.entry(id).or_default() += n;
+            }
+        }
+        for (id, body) in saved {
+            if let Some(node) = graph.nodes.get_mut(&id) {
+                if node.body.is_none() {
+                    node.body = Some(body);
+                }
+            }
         }
         outcome.filled.extend(again.filled);
         outcome.failed.extend(again.failed);
         for (id, n) in again.retries {
             *outcome.retries.entry(id).or_default() += n;
+        }
+        for (id, n) in again.rollbacks {
+            *outcome.rollbacks.entry(id).or_default() += n;
         }
     }
 
@@ -535,6 +568,37 @@ fn run(args: Args) -> Result<bool, String> {
         }
         eprintln!("  pruned {} unused nodes", removed.len());
         current = record_view(&mut store, &graph, &run_id, Some(&current))?;
+    }
+
+    let mut swept = 0;
+    let swaps: Vec<_> = ledger::sweep_plan(&store, &current)
+        .map_err(io)?
+        .into_iter()
+        .filter(|(node, _)| !graph.frozen.contains(node))
+        .collect();
+    if !swaps.is_empty() {
+        let before = all_tests(&crate_dir, &graph);
+        let mut candidate = graph.clone();
+        for (node, version) in &swaps {
+            let body = store.get_version(version).map_err(io)?.body;
+            if let Some(n) = candidate.nodes.get_mut(node) {
+                n.body = body;
+            }
+        }
+        let after = all_tests(&crate_dir, &candidate);
+        let better = after.compiled && (!before.compiled || failing(&after) <= failing(&before));
+        eprintln!(
+            "sweep: {} nodes back to their last good version: {} failing tests before, {} after{}",
+            swaps.len(),
+            failing(&before),
+            failing(&after),
+            if better { "" } else { " (kept the current code)" }
+        );
+        if better {
+            graph = candidate;
+            current = record_view(&mut store, &graph, &run_id, Some(&current))?;
+            swept = swaps.len();
+        }
     }
 
     let final_report = all_tests(&crate_dir, &graph);
@@ -553,14 +617,35 @@ fn run(args: Args) -> Result<bool, String> {
         None => None,
     };
 
+    let ledger_all = ledger::ledger(&store).map_err(io)?;
+    let failures: BTreeMap<NodeId, String> = outcome.failed.iter().cloned().collect();
+    let reports = handoff::node_reports(&graph, &final_report, &failures, &store);
+    let handoff_dir = args.handoff.clone().unwrap_or_else(|| {
+        let mut name = crate_dir.as_os_str().to_owned();
+        name.push("-handoff");
+        PathBuf::from(name)
+    });
+    handoff::write_repo(
+        &store,
+        &current.id,
+        Some(&crate_dir.join("Cargo.toml")),
+        &handoff_dir,
+        &format!(
+            "{}{}{}",
+            handoff::render(&graph, &reports),
+            ledger::summary_markdown(&ledger_all),
+            review_section(&review_notes)
+        ),
+    )?;
+
     let mut metrics = RunMetrics::default();
     for (id, n) in &outcome.retries {
         for _ in 0..*n {
             metrics.record_retry(id);
         }
     }
-    metrics.input_tokens = usage.input.load(Ordering::Relaxed);
-    metrics.output_tokens = usage.output.load(Ordering::Relaxed);
+    metrics.input_tokens = plugin.usage.input.load(Ordering::Relaxed);
+    metrics.output_tokens = plugin.usage.output.load(Ordering::Relaxed);
     metrics.wall_ms = started.elapsed().as_millis() as u64;
 
     outcome
@@ -576,17 +661,37 @@ fn run(args: Args) -> Result<bool, String> {
         "ok": ok,
         "view": current.id.0,
         "store": store_dir.display().to_string(),
+        "handoff": handoff_dir.display().to_string(),
+        "structural": reports.iter().filter(|r| !r.structure.is_empty()).map(|r| format!("{}: {}", r.node.0, r.structure.join("; "))).collect::<Vec<_>>(),
+        "start_here": handoff::start_here(&graph, &reports).iter().map(|n| n.0.clone()).collect::<Vec<_>>(),
         "nodes": graph.nodes.len(),
         "tests": test_count,
         "failed_nodes": outcome.failed.iter().map(|(id, why)| format!("{}: {why}", id.0)).collect::<Vec<_>>(),
         "untested_nodes": untested.iter().map(|(id, _)| id.0.clone()).collect::<Vec<_>>(),
         "failing_tests": failing(&final_report),
+        "skeleton_review": review_notes,
+        "swept_to_last_good": swept,
+        "failures_seen": ledger_all.len(),
+        "failures_open": ledger_all.iter().filter(|f| f.is_open()).count(),
+        "rollbacks": outcome.rollbacks.iter().map(|(id, n)| (id.0.clone(), *n)).collect::<BTreeMap<_, _>>(),
         "clippy_clean": lint_report.ok,
         "oracle_passed": oracle_ok,
         "metrics": serde_json::from_str::<serde_json::Value>(&metrics.to_json()).unwrap_or_default(),
     });
     println!("{summary:#}");
     Ok(ok)
+}
+
+fn review_section(notes: &[String]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## Skeleton review\n\n");
+    for note in notes {
+        out.push_str(&format!("- {note}\n"));
+    }
+    out.push('\n');
+    out
 }
 
 fn history_cmd(args: Vec<String>) -> Result<(), String> {
@@ -596,6 +701,57 @@ fn history_cmd(args: Vec<String>) -> Result<(), String> {
     let store = open_store(&store)?;
     let node = flags.values.get("--node").map(|n| NodeId(n.clone()));
     print!("{}", cli::history(&store, node.as_ref())?);
+    Ok(())
+}
+
+fn graph_cmd(args: Vec<String>) -> Result<(), String> {
+    let flags = Flags::parse(args, &["--out", "--root"], &[])?;
+    if flags.positional.is_empty() {
+        return Err("expected at least one <crate_dir>".to_string());
+    }
+    let dirs: Vec<PathBuf> = flags.positional.iter().map(PathBuf::from).collect();
+    let root = flags.values.get("--root").map_or(PathBuf::from("."), PathBuf::from);
+    let graph = repo_graph::build(&dirs, &root)?;
+    let text = serde_json::to_string_pretty(&graph).map_err(|e| e.to_string())?;
+    match flags.values.get("--out") {
+        Some(path) => std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?,
+        None => println!("{text}"),
+    }
+    eprintln!(
+        "{} nodes, {} edges in {} crate(s)",
+        graph.nodes.len(),
+        graph.edges.len(),
+        graph.crates.len()
+    );
+    Ok(())
+}
+
+fn failures_cmd(args: Vec<String>) -> Result<(), String> {
+    let flags = Flags::parse(args, &["--node"], &["--open"])?;
+    let [store] = <[String; 1]>::try_from(flags.positional.clone())
+        .map_err(|_| "expected <store>".to_string())?;
+    let node = flags.values.get("--node").map(|n| NodeId(n.clone()));
+    print!(
+        "{}",
+        cli::failures(&open_store(&store)?, node.as_ref(), flags.has("--open"))?
+    );
+    Ok(())
+}
+
+fn good_cmd(args: Vec<String>) -> Result<(), String> {
+    let [store, node] =
+        <[String; 2]>::try_from(args).map_err(|_| "expected <store> <node>".to_string())?;
+    print!("{}", cli::good(&open_store(&store)?, &NodeId(node))?);
+    Ok(())
+}
+
+fn sweep_cmd(args: Vec<String>) -> Result<(), String> {
+    let flags = Flags::parse(args, &[], &["--dry-run"])?;
+    let [store, view] = <[String; 2]>::try_from(flags.positional.clone())
+        .map_err(|_| "expected <store> <view>".to_string())?;
+    let mut store = open_store(&store)?;
+    let (text, _) = cli::sweep(&mut store, &view, !flags.has("--dry-run"), now_ms())?;
+    print!("{text}");
     Ok(())
 }
 
@@ -626,7 +782,7 @@ fn export_cmd(args: Vec<String>) -> Result<(), String> {
     let flags = Flags::parse(args, &[], &["--commit"])?;
     let [store, view, dir] = <[String; 3]>::try_from(flags.positional.clone())
         .map_err(|_| "expected <store> <view> <dir>".to_string())?;
-    let commit = flags.switches.iter().any(|s| s == "--commit");
+    let commit = flags.has("--commit");
     let id = cli::export_cmd(&open_store(&store)?, &view, Path::new(&dir), commit)?;
     println!("exported view {}", id.0);
     Ok(())
@@ -635,7 +791,7 @@ fn export_cmd(args: Vec<String>) -> Result<(), String> {
 fn ab_cmd(args: Vec<String>) -> Result<(), String> {
     let flags = Flags::parse(
         args,
-        &["--spec", "--crate", "--n", "--runs", "--noise", "--width"],
+        &["--spec", "--crate", "--n", "--runs", "--noise", "--width", "--provider", "--provider-args"],
         &[],
     )?;
     let [store_dir, view_arg, node_arg] = <[String; 3]>::try_from(flags.positional.clone())
@@ -653,15 +809,17 @@ fn ab_cmd(args: Vec<String>) -> Result<(), String> {
     let base_id = cli::resolve_view(&store, &view_arg)?;
     let mut base = store.get_view(&base_id).map_err(io)?;
     let node = cli::parse_node(&base, &node_arg)?;
-    let registry = Arc::new(Registry::from_config(&Config::load()));
-    let usage = Arc::new(Usage::default());
+    let plugin = open_plugin(
+        flags.values.get("--provider").map(String::as_str),
+        flags.values.get("--provider-args").map(String::as_str),
+    )?;
     let run_id = new_run_id();
 
     let mut graph = view::to_graph(&store, &base).map_err(io)?;
     graph.spec = spec.clone();
     if cli::benches_reaching(&graph, &node).is_empty() {
         eprintln!("no bench reaches {}; generating one", node.0);
-        let mut gen = registry_generator(&registry, &usage);
+        let mut gen = plugin.generator(None);
         let mut check = |g: &Graph| -> Result<(), String> {
             let needed = cli::benches_reaching(g, &node);
             if needed.is_empty() {
@@ -702,7 +860,7 @@ fn ab_cmd(args: Vec<String>) -> Result<(), String> {
         };
         Evaluation { tests, benches }
     };
-    let mut generators = generator_pool(&registry, &usage, width);
+    let mut generators = generator_pool(&plugin, width);
     let report = variants::tournament(
         &mut store,
         &base,
@@ -720,7 +878,7 @@ fn ab_cmd(args: Vec<String>) -> Result<(), String> {
 }
 
 fn edit_cmd(args: Vec<String>) -> Result<(), String> {
-    let flags = Flags::parse(args, &["--spec"], &[])?;
+    let flags = Flags::parse(args, &["--spec", "--provider", "--provider-args"], &[])?;
     let [store_dir, view_arg, crate_dir, ids @ ..] = flags.positional.as_slice() else {
         return Err("expected <store> <view> <crate_dir> <node ids...>".into());
     };
@@ -743,9 +901,11 @@ fn edit_cmd(args: Vec<String>) -> Result<(), String> {
         node.body = None;
     }
 
-    let registry = Arc::new(Registry::from_config(&Config::load()));
-    let usage = Arc::new(Usage::default());
-    let mut gen = registry_generator(&registry, &usage);
+    let plugin = open_plugin(
+        flags.values.get("--provider").map(String::as_str),
+        flags.values.get("--provider-args").map(String::as_str),
+    )?;
+    let mut gen = plugin.generator(None);
     let run_id = new_run_id();
     let mut run_tests = |g: &Graph, only: &[NodeId]| {
         verify::run_tests(&crate_dir, &assemble(g), only).unwrap_or_default()
@@ -785,7 +945,7 @@ fn dispatch(args: Vec<String>) -> Result<bool, String> {
     let mut args = args;
     let command = args.first().cloned().unwrap_or_default();
     let known = [
-        "history", "diff", "undo", "swap", "export", "ab", "edit", "run",
+        "history", "diff", "graph", "failures", "good", "sweep", "undo", "swap", "export", "ab", "edit", "run",
     ];
     if !known.contains(&command.as_str()) {
         return run(parse_args(args)?);
@@ -795,6 +955,10 @@ fn dispatch(args: Vec<String>) -> Result<bool, String> {
         "run" => return run(parse_args(args)?),
         "history" => history_cmd(args)?,
         "diff" => diff_cmd(args)?,
+        "graph" => graph_cmd(args)?,
+        "failures" => failures_cmd(args)?,
+        "good" => good_cmd(args)?,
+        "sweep" => sweep_cmd(args)?,
         "undo" => undo_cmd(args)?,
         "swap" => swap_cmd(args)?,
         "export" => export_cmd(args)?,

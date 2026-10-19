@@ -1,0 +1,49 @@
+{{ define "main" }}
+{{ $n := .Params.node }}
+{{ $by := partialCached "code/index.html" . }}
+{{ $out := where hugo.Data.graph.edges "from" $n.id }}
+{{ $in := where hugo.Data.graph.edges "to" $n.id }}
+{{ $repo := hugo.Data.repo }}
+<article class="wrap prose node">
+  <p class="crumbs"><a href="{{ "code/" | relURL }}">Code</a> / {{ $n.crate_name }} / {{ $n.module }}{{ with $n.owner }} / {{ . }}{{ end }}</p>
+  <h1><code>{{ $n.name }}</code></h1>
+  <p class="meta">
+    <span class="badge-kind">{{ $n.kind }}</span>
+    {{ if $n.public }}public{{ else }}private{{ end }} ·
+    {{ if or (eq $n.kind "fn") (eq $n.kind "method") }}depth {{ $n.level }} (filled {{ if eq $n.level 0 }}first{{ else }}after the {{ $n.level }} level{{ if gt $n.level 1 }}s{{ end }} below it{{ end }}) · {{ end }}
+    <a href="{{ $repo.url }}/blob/{{ $repo.commit }}/{{ $n.file }}#L{{ $n.line }}-L{{ $n.end_line }}">{{ $n.file }}:{{ $n.line }}</a>
+  </p>
+  {{ with $n.doc }}<h2>Contract</h2><pre class="doc">{{ . }}</pre>{{ end }}
+  <h2>Source</h2>
+  {{ highlight $n.source "rust" "" }}
+
+  {{ $calls := slice }}{{ $possible := slice }}{{ $types := slice }}{{ $consts := slice }}
+  {{ range $out }}
+    {{ if and (eq .kind "calls") .exact }}{{ $calls = $calls | append (dict "id" .to) }}
+    {{ else if eq .kind "calls" }}{{ $possible = $possible | append (dict "id" .to) }}
+    {{ else if eq .kind "uses_type" }}{{ $types = $types | append (dict "id" .to) }}
+    {{ else }}{{ $consts = $consts | append (dict "id" .to) }}{{ end }}
+  {{ end }}
+  {{ $callers := slice }}{{ $tests := slice }}{{ $users := slice }}
+  {{ range $in }}
+    {{ $from := index $by .from }}
+    {{ if eq .kind "calls" }}
+      {{ if eq $from.kind "test" }}{{ $tests = $tests | append (dict "id" .from) }}{{ else }}{{ $callers = $callers | append (dict "id" .from) }}{{ end }}
+    {{ else }}{{ $users = $users | append (dict "id" .from) }}{{ end }}
+  {{ end }}
+  <div class="edge-grid">
+    <div>
+      {{ partial "code/list.html" (dict "title" "Calls" "items" $calls) }}
+      {{ partial "code/list.html" (dict "title" "May call (matched by name)" "items" $possible "possible" true) }}
+      {{ partial "code/list.html" (dict "title" "Uses types" "items" $types) }}
+      {{ partial "code/list.html" (dict "title" "Uses constants" "items" $consts) }}
+    </div>
+    <div>
+      {{ partial "code/list.html" (dict "title" "Called by" "items" $callers) }}
+      {{ partial "code/list.html" (dict "title" "Tests that reach it" "items" $tests) }}
+      {{ partial "code/list.html" (dict "title" "Used as a type by" "items" $users) }}
+    </div>
+  </div>
+  <p><a href="{{ printf "code/#%s" $n.slug | relURL }}">Open in the explorer</a></p>
+</article>
+{{ end }}

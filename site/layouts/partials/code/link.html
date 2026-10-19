@@ -1,0 +1,2 @@
+{{- $n := .node -}}
+<li><a href="{{ printf "code/%s/" $n.slug | relURL }}"><code>{{ $n.name }}</code></a> <span class="muted">{{ $n.kind }} · {{ $n.module }}{{ with .possible }} · by name only{{ end }}</span></li>

@@ -1,0 +1,9 @@
+target
+site/data/graph.json
+site/static/islands
+site/static/graph
+site/public
+site/resources
+site/web/node_modules
+site/.hugo_build.lock
+.DS_Store

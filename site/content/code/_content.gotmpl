@@ -1,0 +1,3 @@
+{{ range hugo.Data.graph.nodes }}
+  {{ $.AddPage (dict "path" .slug "title" .name "params" (dict "node" .)) }}
+{{ end }}

@@ -1,0 +1,9 @@
+<table class="data">
+  <thead><tr><th>Run</th><th>Tool build</th><th>Result</th><th class="n">Retries</th><th class="n">Minutes</th><th>What happened</th></tr></thead>
+  <tbody>
+  {{ range .runs }}
+    <tr><td>{{ .id }}</td><td>{{ .build }}</td><td>{{ .result }}</td><td class="n">{{ .retries }}</td><td class="n">{{ printf "%.1f" .minutes }}</td><td>{{ .detail }}</td></tr>
+  {{ end }}
+  </tbody>
+</table>
+<p class="note">{{ .note }}</p>

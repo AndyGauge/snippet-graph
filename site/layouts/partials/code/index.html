@@ -1,0 +1,3 @@
+{{- $s := newScratch -}}
+{{- range hugo.Data.graph.nodes }}{{ $s.SetInMap "by" .id . }}{{ end -}}
+{{- return ($s.Get "by") -}}

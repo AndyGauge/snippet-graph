@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="{{ site.Language.Locale }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if .IsHome }}{{ site.Title }}: {{ .Params.tagline }}{{ else }}{{ .Title }} · {{ site.Title }}{{ end }}</title>
+  <meta name="description" content="{{ with .Params.description }}{{ . }}{{ else }}{{ site.Params.description }}{{ end }}">
+  {{ $css := resources.Get "css/site.css" | resources.Minify | resources.Fingerprint }}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}">
+  <link rel="stylesheet" href="{{ "islands/islands.css" | relURL }}">
+  <script>
+    try { var t = localStorage.getItem("sg-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap bar">
+      <a class="brand" href="{{ "/" | relURL }}">snippet-graph</a>
+      <nav aria-label="Main">
+        <ul>
+          {{ $here := . }}
+          {{ range site.Menus.main }}
+            <li><a href="{{ .URL }}"{{ if $here.IsMenuCurrent "main" . }} aria-current="page"{{ end }}>{{ .Name }}</a></li>
+          {{ end }}
+        </ul>
+      </nav>
+      <button class="theme" type="button" id="theme-toggle" aria-label="Switch between light and dark">◐</button>
+    </div>
+  </header>
+  <main id="main">
+    {{ block "main" . }}{{ end }}
+  </main>
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>snippet-graph is a Rust crate and the <code>sg</code> command. Numbers on these pages come from runs on one machine, one sample each unless a page says otherwise.</p>
+    </div>
+  </footer>
+  <script>
+    (function () {
+      var b = document.getElementById("theme-toggle");
+      if (!b) return;
+      b.addEventListener("click", function () {
+        var root = document.documentElement;
+        var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        var next = dark ? "light" : "dark";
+        root.dataset.theme = next;
+        try { localStorage.setItem("sg-theme", next); } catch (e) {}
+      });
+    })();
+  </script>
+  <script type="module" src="{{ "islands/islands.js" | relURL }}"></script>
+</body>
+</html>

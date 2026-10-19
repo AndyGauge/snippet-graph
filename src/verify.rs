@@ -155,6 +155,20 @@ fn leaf(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }
 
+/// A test that starts and never reports took the test process down (a stack
+/// overflow or an abort); the last lines of stderr say how.
+fn abort_text(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let tail = &lines[lines.len().saturating_sub(6)..];
+    format!(
+        "test aborted the test process without reporting a result:\n{}",
+        tail.join("\n")
+    )
+}
+
 /// Write the files, run `cargo test`, and report each test's outcome with its
 /// panic text. A test's id is the Test node whose function name matches.
 /// `only` limits the run to those test nodes (all when empty). Compile errors
@@ -172,15 +186,14 @@ pub fn run_tests(
     let mut command = Command::new("cargo");
     command
         .args(["test", "--no-fail-fast", "--message-format=json"])
+        .args(["--", "-Z", "unstable-options", "--format", "json"])
         .current_dir(crate_dir)
+        .env("RUSTC_BOOTSTRAP", "1")
         .env_remove("CARGO_TARGET_DIR")
         .stdin(Stdio::null());
-    if !only.is_empty() {
-        command.arg("--");
-        for id in only {
-            let name = names.get(id).map(String::as_str).unwrap_or(id.0.as_str());
-            command.arg(name);
-        }
+    for id in only {
+        let name = names.get(id).map(String::as_str).unwrap_or(id.0.as_str());
+        command.arg(name);
     }
     let output = command.output()?;
 
@@ -188,49 +201,48 @@ pub fn run_tests(
     let mut build_ok = true;
     let mut results: Vec<(String, bool)> = Vec::new();
     let mut failures: BTreeMap<String, String> = BTreeMap::new();
-    let mut current: Option<String> = None;
+    let mut started: Vec<String> = Vec::new();
 
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            match value["reason"].as_str() {
-                Some("compiler-message") if value["message"]["level"] == "error" => {
-                    attribute(
-                        assembled,
-                        &value["message"],
-                        &mut report.build_errors,
-                        &mut report.unattributed,
-                    );
-                }
-                Some("build-finished") if value["success"] == false => build_ok = false,
-                _ => {}
-            }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
-        }
-        if let Some(rest) = line.strip_prefix("---- ") {
-            if let Some(name) = rest.strip_suffix(" stdout ----") {
-                current = Some(name.to_string());
-                failures.entry(name.to_string()).or_default();
-                continue;
-            }
-        }
-        if line == "failures:" {
-            current = None;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("test ") {
-            if let Some((name, status)) = rest.rsplit_once(" ... ") {
-                match status {
-                    "ok" => results.push((name.to_string(), true)),
-                    "FAILED" => results.push((name.to_string(), false)),
+        };
+        match (value["type"].as_str(), value["reason"].as_str()) {
+            (Some("test"), _) => {
+                let Some(name) = value["name"].as_str() else {
+                    continue;
+                };
+                match value["event"].as_str() {
+                    Some("started") => started.push(name.to_string()),
+                    Some("ok") => results.push((name.to_string(), true)),
+                    Some("failed") | Some("timeout") => {
+                        results.push((name.to_string(), false));
+                        failures.insert(
+                            name.to_string(),
+                            value["stdout"].as_str().unwrap_or_default().to_string(),
+                        );
+                    }
                     _ => {}
                 }
-                continue;
             }
+            (_, Some("compiler-message")) if value["message"]["level"] == "error" => {
+                attribute(
+                    assembled,
+                    &value["message"],
+                    &mut report.build_errors,
+                    &mut report.unattributed,
+                );
+            }
+            (_, Some("build-finished")) if value["success"] == false => build_ok = false,
+            _ => {}
         }
-        if let Some(name) = &current {
-            let entry = failures.entry(name.clone()).or_default();
-            entry.push_str(line);
-            entry.push('\n');
+    }
+
+    let aborted = abort_text(&String::from_utf8_lossy(&output.stderr));
+    for name in started {
+        if !results.iter().any(|(n, _)| *n == name) {
+            results.push((name.clone(), false));
+            failures.insert(name, aborted.clone());
         }
     }
 
@@ -427,6 +439,59 @@ mod tests {
             .unwrap();
         assert!(!broken.passed);
         assert!(broken.message.contains("sum was wrong"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_tests_ignores_lookalike_lines_in_test_output() {
+        let src = "pub fn add(a: u32, b: u32) -> u32 { a + b }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds() { assert_eq!(add(1, 2), 3); }
+    #[test]
+    fn noisy() {
+        println!(\"test adds ... FAILED\");
+        println!(\"---- adds stdout ----\");
+        panic!(\"real failure\");
+    }
+}
+";
+        let a = assembled(src, &[("add", 1, 1), ("t_adds", 5, 6), ("t_noisy", 7, 12)]);
+        let dir = temp_crate("lookalike");
+        let report = run_tests(&dir, &a, &[]).unwrap();
+        let adds: Vec<_> = report.outcomes.iter().filter(|o| o.test.0 == "t_adds").collect();
+        assert_eq!(adds.len(), 1);
+        assert!(adds[0].passed);
+        let noisy = report.outcomes.iter().find(|o| o.test.0 == "t_noisy").unwrap();
+        assert!(!noisy.passed);
+        assert!(noisy.message.contains("real failure"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_tests_reports_a_test_that_aborts_the_process() {
+        let src = "pub fn f(n: u64) -> u64 { if n == u64::MAX { 0 } else { f(n + 1) + 1 } }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fine() { assert_eq!(1, 1); }
+    #[test]
+    fn overflows() { assert_eq!(f(0), 1); }
+}
+";
+        let a = assembled(src, &[("f", 1, 1), ("t_fine", 5, 6), ("t_overflows", 7, 8)]);
+        let dir = temp_crate("abort");
+        let report = run_tests(&dir, &a, &[]).unwrap();
+        let overflows = report
+            .outcomes
+            .iter()
+            .find(|o| o.test.0 == "t_overflows")
+            .expect("an aborting test must still have an outcome");
+        assert!(!overflows.passed);
+        assert!(overflows.message.contains("aborted"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

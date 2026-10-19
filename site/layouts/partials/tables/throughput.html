@@ -1,0 +1,10 @@
+{{ $streams := .streams }}
+<table class="data">
+  <caption>{{ .title }}</caption>
+  <thead><tr><th>Setup</th>{{ range $streams }}<th class="n">{{ . }}</th>{{ end }}</tr></thead>
+  <tbody>
+  {{ range .series }}<tr><td>{{ .name }}</td>{{ range .total }}<td class="n">{{ if . }}{{ . }}{{ end }}</td>{{ end }}</tr>{{ end }}
+  {{ range .also }}<tr><td>{{ .name }}</td>{{ range .total }}<td class="n">{{ if . }}{{ . }}{{ end }}</td>{{ end }}</tr>{{ end }}
+  </tbody>
+</table>
+<p class="note">{{ .note }}</p>
