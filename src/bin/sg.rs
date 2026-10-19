@@ -316,12 +316,14 @@ fn run_oracle(crate_dir: &Path, graph: &Graph, oracle: &Path) -> Result<bool, St
     let oracle_src = std::fs::read_to_string(oracle).map_err(|e| e.to_string())?;
     std::fs::write(work.join("src/lib.rs"), format!("{lib}\n{oracle_src}"))
         .map_err(|e| e.to_string())?;
-    let status = Command::new("cargo")
+    let output = Command::new("cargo")
         .args(["test", "--quiet"])
         .current_dir(&work)
-        .status()
+        .output()
         .map_err(|e| e.to_string())?;
-    Ok(status.success())
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    Ok(output.status.success())
 }
 
 fn run(args: Args) -> Result<bool, String> {
