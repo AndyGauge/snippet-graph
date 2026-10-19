@@ -41,6 +41,9 @@ pub struct Graph {
     pub nodes: BTreeMap<NodeId, Node>,
     /// `uses[a]` contains `b` when `a` depends on `b`.
     pub uses: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    /// The specification the graph was generated from; included in fill prompts.
+    #[serde(default)]
+    pub spec: String,
 }
 
 impl Node {

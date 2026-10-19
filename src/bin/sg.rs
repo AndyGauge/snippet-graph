@@ -339,9 +339,14 @@ fn run(args: Args) -> Result<bool, String> {
     let run_id = new_run_id();
 
     let (mut graph, untested) = match &args.resume {
-        Some(path) => (load_state(path)?, Vec::new()),
+        Some(path) => {
+            let mut graph = load_state(path)?;
+            graph.spec = spec.clone();
+            (graph, Vec::new())
+        }
         None => {
             let mut graph = make_skeleton(&mut gen, &crate_dir, &spec)?;
+            graph.spec = spec.clone();
             eprintln!("skeleton ok: {} nodes", graph.nodes.len());
             let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
             let untested = testgen::generate_all(
@@ -596,6 +601,7 @@ fn ab_cmd(args: Vec<String>) -> Result<(), String> {
     let run_id = new_run_id();
 
     let mut graph = view::to_graph(&store, &base).map_err(io)?;
+    graph.spec = spec.clone();
     if cli::benches_reaching(&graph, &node).is_empty() {
         eprintln!("no bench reaches {}; generating one", node.0);
         let mut gen = registry_generator(&registry, &usage);
@@ -664,12 +670,13 @@ fn edit_cmd(args: Vec<String>) -> Result<(), String> {
     if ids.is_empty() {
         return Err("name at least one node to edit".into());
     }
-    let _ = flags.required("--spec")?;
+    let spec = std::fs::read_to_string(flags.required("--spec")?).map_err(io)?;
     let crate_dir = PathBuf::from(crate_dir);
     let mut store = open_store(store_dir)?;
     let base_id = cli::resolve_view(&store, view_arg)?;
     let base = store.get_view(&base_id).map_err(io)?;
     let mut graph = view::to_graph(&store, &base).map_err(io)?;
+    graph.spec = spec;
     for id in ids {
         let id = cli::parse_node(&base, id)?;
         let node = graph.nodes.get_mut(&id).ok_or_else(|| id.0.clone())?;

@@ -20,6 +20,7 @@ pub fn build_prompt(spec: &str, graph: &Graph, subject: &NodeId, errors: &[Strin
         "- Assert only what the specification states; do not guess unspecified behavior.\n",
     );
     out.push_str("- Do not rely on any other function being correct beyond its signature.\n");
+    out.push_str("- If the specification gives example inputs and outputs, use them exactly. Any other expected value must follow from the specification's stated algorithm applied step by step to the input, including its floating-point or integer arithmetic; never use a value that only follows from your own idea of how the function should work.\n");
     out.push_str("- Anything touching the filesystem must use a unique directory under `std::env::temp_dir()` (include the test name and process id), never a shared path.\n");
     out.push_str("- The tests run inside `mod tests` with `use super::*;`.\n");
     out.push_str("\nSpecification:\n");

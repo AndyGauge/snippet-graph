@@ -20,6 +20,11 @@ pub fn build_prompt(graph: &Graph, id: &NodeId, prior_errors: &[String]) -> Stri
     let mut out = String::new();
     if let Some(node) = graph.nodes.get(id) {
         out.push_str("Implement the body of this Rust item. Respond with only the body as a single `{ ... }` block.\n\n");
+        if !graph.spec.is_empty() {
+            out.push_str("Specification of the whole program. Follow it exactly, including any stated algorithm, formula, ordering or numeric method, even where you would do it differently:\n```\n");
+            out.push_str(&graph.spec);
+            out.push_str("\n```\n\nThe item to implement:\n");
+        }
         if let Some(header) = &node.impl_header {
             out.push_str(&format!("Inside `{header}`:\n"));
         }
@@ -886,5 +891,26 @@ mod tests {
         assert_eq!(plain, ver);
         assert_eq!(p.filled, v.filled);
         assert_eq!(p.retries, v.retries);
+    }
+
+    #[test]
+    fn prompt_includes_the_spec_when_present() {
+        let mut g = Graph::default();
+        g.insert(Node {
+            id: NodeId("f".into()),
+            kind: NodeKind::Function,
+            signature: "fn f()".into(),
+            body: None,
+            impl_header: None,
+            placement: Placement {
+                file: "lib.rs".into(),
+                index: 0,
+            },
+        });
+        assert!(!build_prompt(&g, &NodeId("f".into()), &[]).contains("Specification"));
+        g.spec = "multiply by 100.0 first".into();
+        let p = build_prompt(&g, &NodeId("f".into()), &[]);
+        assert!(p.contains("multiply by 100.0 first"));
+        assert!(p.contains("fn f()"));
     }
 }
