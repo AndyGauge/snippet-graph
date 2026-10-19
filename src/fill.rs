@@ -1,4 +1,7 @@
-use crate::model::{Graph, Node, NodeId, NodeKind, TestReport};
+use crate::model::{Graph, Node, NodeId, NodeKind, TestOutcome, TestReport};
+use crate::version::{
+    content_hash, NodeVersion, Origin, Results, RunId, Store, StoreError, VersionId, View,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub trait Generator {
@@ -263,6 +266,175 @@ pub fn fill_all_tested(
     run: &mut dyn FnMut(&Graph, &[NodeId]) -> TestReport,
     max_retries: usize,
 ) -> Outcome {
+    match fill_tested_impl(graph, generator, run, max_retries, None) {
+        Ok(outcome) => outcome,
+        Err(_) => unreachable!("no store without a recorder"),
+    }
+}
+
+/// `fill_all_tested` that keeps every candidate body as a stored version (parent
+/// is the node's previous attempt), records a view and results after each
+/// attempt, and feeds earlier failures for the node into its retry prompt.
+/// Returns the final view alongside the outcome.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_all_versioned(
+    graph: &mut Graph,
+    generator: &mut dyn Generator,
+    run: &mut dyn FnMut(&Graph, &[NodeId]) -> TestReport,
+    max_retries: usize,
+    store: &mut dyn Store,
+    run_id: &RunId,
+    model: &str,
+    parent: Option<&View>,
+) -> Result<(Outcome, View), StoreError> {
+    let mut rec = Recorder::new(store, run_id, model, parent);
+    let outcome = fill_tested_impl(graph, generator, run, max_retries, Some(&mut rec))?;
+    let view = rec.finish(graph)?;
+    Ok((outcome, view))
+}
+
+pub(crate) struct Recorder<'a> {
+    store: &'a mut dyn Store,
+    run: RunId,
+    model: String,
+    view: Option<View>,
+    clock: u64,
+    last: BTreeMap<NodeId, VersionId>,
+    history: BTreeMap<NodeId, Vec<String>>,
+}
+
+impl<'a> Recorder<'a> {
+    pub(crate) fn new(
+        store: &'a mut dyn Store,
+        run: &RunId,
+        model: &str,
+        parent: Option<&View>,
+    ) -> Self {
+        Recorder {
+            store,
+            run: run.clone(),
+            model: model.to_string(),
+            view: parent.cloned(),
+            clock: parent.map_or(0, |p| p.created_ms + 1),
+            last: parent.map(|p| p.versions.clone()).unwrap_or_default(),
+            history: BTreeMap::new(),
+        }
+    }
+
+    fn origin(&mut self, prompt: &str) -> Origin {
+        self.clock += 1;
+        Origin {
+            run: self.run.clone(),
+            model: self.model.clone(),
+            prompt_hash: content_hash(&[prompt]),
+            created_ms: self.clock,
+        }
+    }
+
+    pub(crate) fn prompt_errors(
+        &self,
+        node: &NodeId,
+        current: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        let mut out: Vec<String> = Vec::new();
+        let earlier = crate::results::failures_for(&*self.store, node)?;
+        let local = self.history.get(node).cloned().unwrap_or_default();
+        for e in earlier
+            .into_iter()
+            .chain(local)
+            .chain(current.iter().cloned())
+        {
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn note_failures(&mut self, node: &NodeId, errors: &[String]) {
+        let h = self.history.entry(node.clone()).or_default();
+        for e in errors {
+            if !h.contains(e) {
+                h.push(e.clone());
+            }
+        }
+    }
+
+    pub(crate) fn attempt(
+        &mut self,
+        graph: &Graph,
+        node: &NodeId,
+        prompt: &str,
+    ) -> Result<(), StoreError> {
+        let Some(n) = graph.nodes.get(node) else {
+            return Ok(());
+        };
+        let origin = self.origin(prompt);
+        let version = NodeVersion::new(n, self.last.get(node).cloned(), origin);
+        let id = self.store.put_version(version)?;
+        self.last.insert(node.clone(), id);
+        Ok(())
+    }
+
+    pub(crate) fn commit(
+        &mut self,
+        graph: &Graph,
+        tests: Vec<TestOutcome>,
+    ) -> Result<(), StoreError> {
+        let view = self.snapshot(graph)?;
+        self.clock += 1;
+        self.store.put_results(Results {
+            view: view.id.clone(),
+            tests,
+            benches: Vec::new(),
+            clippy_clean: None,
+            recorded_ms: self.clock,
+        })?;
+        Ok(())
+    }
+
+    fn snapshot(&mut self, graph: &Graph) -> Result<View, StoreError> {
+        let origin = self.origin("");
+        let view =
+            crate::view::from_graph(self.store, graph, &self.run, &origin, self.view.as_ref())?;
+        self.store.put_view(view.clone())?;
+        self.view = Some(view.clone());
+        Ok(view)
+    }
+
+    pub(crate) fn finish(&mut self, graph: &Graph) -> Result<View, StoreError> {
+        self.snapshot(graph)
+    }
+}
+
+pub(crate) fn report_outcomes(report: &TestReport, target: &NodeId) -> Vec<TestOutcome> {
+    let mut out = report.outcomes.clone();
+    for (node, errs) in &report.build_errors {
+        for e in errs {
+            out.push(TestOutcome {
+                test: node.clone(),
+                passed: false,
+                message: e.clone(),
+            });
+        }
+    }
+    for e in &report.unattributed {
+        out.push(TestOutcome {
+            test: target.clone(),
+            passed: false,
+            message: e.clone(),
+        });
+    }
+    out
+}
+
+fn fill_tested_impl(
+    graph: &mut Graph,
+    generator: &mut dyn Generator,
+    run: &mut dyn FnMut(&Graph, &[NodeId]) -> TestReport,
+    max_retries: usize,
+    mut rec: Option<&mut Recorder<'_>>,
+) -> Result<Outcome, StoreError> {
     let mut outcome = Outcome {
         filled: Vec::new(),
         failed: Vec::new(),
@@ -281,7 +453,11 @@ pub fn fill_all_tested(
         let mut target = id.clone();
         let mut errors: Vec<String> = Vec::new();
         loop {
-            let prompt = build_prompt(graph, &target, &errors);
+            let shown = match rec.as_mut() {
+                Some(r) => r.prompt_errors(&target, &errors)?,
+                None => errors.clone(),
+            };
+            let prompt = build_prompt(graph, &target, &shown);
             let attempt = generator.generate(&prompt).and_then(|r| {
                 extract_body(&r).ok_or_else(|| "no `{ ... }` block in response".to_string())
             });
@@ -294,6 +470,10 @@ pub fn fill_all_tested(
                     }
                     let tests = affected_tests(graph, &[&id, &target]);
                     let report = run(graph, &tests);
+                    if let Some(r) = rec.as_mut() {
+                        r.attempt(graph, &target, &prompt)?;
+                        r.commit(graph, report_outcomes(&report, &target))?;
+                    }
                     let build_target = if report.build_errors.contains_key(&target) {
                         Some(target.clone())
                     } else {
@@ -324,6 +504,9 @@ pub fn fill_all_tested(
                 outcome.filled.push(id.clone());
                 break;
             };
+            if let Some(r) = rec.as_mut() {
+                r.note_failures(&t, &errs);
+            }
             target = t;
             errors = errs;
             let used = outcome.retries.get(&target).copied().unwrap_or(0);
@@ -338,7 +521,7 @@ pub fn fill_all_tested(
             *outcome.retries.entry(target.clone()).or_default() += 1;
         }
     }
-    outcome
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -526,5 +709,182 @@ mod tests {
         assert_eq!(out.retries[&nid("a")], 1);
         assert!(g.nodes[&nid("a")].body.is_none());
         assert!(gen.1[1].contains("E0308"));
+    }
+
+    fn wrong_check(g: &Graph, tests: &[NodeId], msg: &str) -> TestReport {
+        let outcomes = tests
+            .iter()
+            .map(|t| {
+                let subject = t.0.trim_start_matches("t_");
+                let ok = !g.nodes[&nid(subject)]
+                    .body
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("wrong");
+                TestOutcome {
+                    test: t.clone(),
+                    passed: ok,
+                    message: msg.into(),
+                }
+            })
+            .collect();
+        TestReport {
+            compiled: true,
+            outcomes,
+            ..Default::default()
+        }
+    }
+
+    fn tested_graph() -> Graph {
+        let mut g = Graph::default();
+        g.insert(func("a", "fn a()"));
+        let mut ta = func("t_a", "#[test] fn t_a()");
+        ta.kind = NodeKind::Test;
+        ta.body = Some("{}".into());
+        g.insert(ta);
+        g.add_use(&nid("t_a"), &nid("a"));
+        g
+    }
+
+    #[test]
+    fn versioned_fill_keeps_every_attempt_and_failure_text() {
+        use crate::version::MemoryStore;
+        let mut g = tested_graph();
+        let mut gen = Fake(
+            VecDeque::from([
+                Ok("{ wrong }".to_string()),
+                Ok("{ wrong2 wrong }".to_string()),
+                Ok("{ right }".to_string()),
+            ]),
+            Vec::new(),
+        );
+        let mut n = 0;
+        let mut run = |g: &Graph, tests: &[NodeId]| {
+            n += 1;
+            wrong_check(g, tests, &format!("failure number {n}"))
+        };
+        let mut store = MemoryStore::default();
+        let (out, view) = fill_all_versioned(
+            &mut g,
+            &mut gen,
+            &mut run,
+            3,
+            &mut store,
+            &RunId("r".into()),
+            "m",
+            None,
+        )
+        .unwrap();
+        assert!(out.failed.is_empty());
+        let versions = store.versions_of(&nid("a")).unwrap();
+        assert_eq!(versions.len(), 3);
+        let first = store.get_version(&versions[0]).unwrap();
+        let second = store.get_version(&versions[1]).unwrap();
+        let third = store.get_version(&versions[2]).unwrap();
+        assert_eq!(first.body.as_deref(), Some("{ wrong }"));
+        assert_eq!(first.parent, None);
+        assert_eq!(second.parent, Some(first.id.clone()));
+        assert_eq!(third.parent, Some(second.id.clone()));
+        assert!(third.origin.created_ms > second.origin.created_ms);
+        assert_eq!(view.versions[&nid("a")], third.id);
+        assert_eq!(
+            store
+                .get_version(&view.versions[&nid("a")])
+                .unwrap()
+                .body
+                .as_deref(),
+            Some("{ right }")
+        );
+        assert!(gen.1[1].contains("failure number 1"));
+        assert!(gen.1[2].contains("failure number 1"));
+        assert!(gen.1[2].contains("failure number 2"));
+        let crate::version::Results { tests, .. } = store
+            .results_for(&view.parent.clone().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(tests.iter().all(|t| t.passed));
+        assert_eq!(store.all_results().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn versioned_fill_records_build_errors_as_failures() {
+        use crate::version::MemoryStore;
+        let mut g = Graph::default();
+        g.insert(func("a", "fn a()"));
+        let mut gen = Fake(
+            VecDeque::from([Ok("{ x }".to_string()), Ok("{ y }".to_string())]),
+            Vec::new(),
+        );
+        let mut run = |g: &Graph, _: &[NodeId]| {
+            if g.nodes[&nid("a")].body.as_deref() == Some("{ x }") {
+                TestReport {
+                    compiled: false,
+                    build_errors: BTreeMap::from([(nid("a"), vec!["E0308".to_string()])]),
+                    ..Default::default()
+                }
+            } else {
+                TestReport {
+                    compiled: true,
+                    ..Default::default()
+                }
+            }
+        };
+        let mut store = MemoryStore::default();
+        let (out, view) = fill_all_versioned(
+            &mut g,
+            &mut gen,
+            &mut run,
+            1,
+            &mut store,
+            &RunId("r".into()),
+            "m",
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.filled, vec![nid("a")]);
+        assert!(gen.1[1].contains("E0308"));
+        let all = store.all_results().unwrap();
+        assert!(all
+            .iter()
+            .any(|r| r.tests.iter().any(|t| !t.passed && t.message == "E0308")));
+        assert_eq!(
+            store
+                .get_version(&view.versions[&nid("a")])
+                .unwrap()
+                .body
+                .as_deref(),
+            Some("{ y }")
+        );
+    }
+
+    #[test]
+    fn versioned_fill_matches_plain_fill() {
+        use crate::version::MemoryStore;
+        let script = || {
+            Fake(
+                VecDeque::from([Ok("{ wrong }".to_string()), Ok("{ right }".to_string())]),
+                Vec::new(),
+            )
+        };
+        let mut plain = tested_graph();
+        let mut g1 = script();
+        let p = fill_all_tested(&mut plain, &mut g1, &mut |g, t| wrong_check(g, t, "m"), 2);
+        let mut ver = tested_graph();
+        let mut g2 = script();
+        let mut store = MemoryStore::default();
+        let (v, _) = fill_all_versioned(
+            &mut ver,
+            &mut g2,
+            &mut |g, t| wrong_check(g, t, "m"),
+            2,
+            &mut store,
+            &RunId("r".into()),
+            "m",
+            None,
+        )
+        .unwrap();
+        assert_eq!(plain, ver);
+        assert_eq!(p.filled, v.filled);
+        assert_eq!(p.retries, v.retries);
     }
 }

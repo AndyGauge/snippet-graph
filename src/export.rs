@@ -5,7 +5,8 @@ use crate::view::to_graph;
 use std::path::{Component, Path};
 use std::process::Command;
 
-const MANIFEST: &str = "[package]\nname = \"exported\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n";
+const MANIFEST: &str =
+    "[package]\nname = \"exported\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n";
 
 /// Render `view` to `dir` as a buildable crate (assembled sources only). When
 /// `commit` is set and `dir` is a git repository, commit the result with the
@@ -25,7 +26,10 @@ fn export_graph(graph: &Graph, view: &View, dir: &Path, commit: bool) -> Result<
             .components()
             .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
         {
-            return Err(format!("refusing to write outside export dir: {}", rel.display()));
+            return Err(format!(
+                "refusing to write outside export dir: {}",
+                rel.display()
+            ));
         }
         let path = dir.join(rel);
         if let Some(parent) = path.parent() {
@@ -91,7 +95,13 @@ mod tests {
     }
 
     fn view() -> View {
-        View::new(RunId("r1".into()), None, BTreeMap::new(), BTreeMap::new(), 0)
+        View::new(
+            RunId("r1".into()),
+            None,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            0,
+        )
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -132,7 +142,10 @@ mod tests {
         let dir = tmp("manifest");
         std::fs::write(dir.join("Cargo.toml"), "custom").unwrap();
         export_graph(&graph(), &view(), &dir, false).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("Cargo.toml")).unwrap(), "custom");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Cargo.toml")).unwrap(),
+            "custom"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
-use crate::fill::{build_prompt, extract_body, Generator, Outcome};
-use crate::model::{Graph, NodeId, NodeKind};
+use crate::fill::{build_prompt, extract_body, Generator, Outcome, Recorder};
+use crate::model::{Graph, NodeId, NodeKind, TestOutcome};
+use crate::version::{RunId, Store, StoreError, View};
 use std::collections::BTreeMap;
 
 fn generate_round(
@@ -51,6 +52,39 @@ pub fn fill_parallel(
     check: &(dyn Fn(&Graph) -> BTreeMap<NodeId, Vec<String>> + Sync),
     max_retries: usize,
 ) -> Outcome {
+    match fill_parallel_impl(graph, generators, check, max_retries, None) {
+        Ok(outcome) => outcome,
+        Err(_) => unreachable!("no store without a recorder"),
+    }
+}
+
+/// `fill_parallel` that stores every candidate body as a version (parent is the
+/// node's previous attempt), records one view and results per round, and adds
+/// earlier failures for each node to its retry prompt. Returns the final view.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_parallel_versioned(
+    graph: &mut Graph,
+    generators: &mut [Box<dyn Generator + Send>],
+    check: &(dyn Fn(&Graph) -> BTreeMap<NodeId, Vec<String>> + Sync),
+    max_retries: usize,
+    store: &mut dyn Store,
+    run: &RunId,
+    model: &str,
+    parent: Option<&View>,
+) -> Result<(Outcome, View), StoreError> {
+    let mut rec = Recorder::new(store, run, model, parent);
+    let outcome = fill_parallel_impl(graph, generators, check, max_retries, Some(&mut rec))?;
+    let view = rec.finish(graph)?;
+    Ok((outcome, view))
+}
+
+fn fill_parallel_impl(
+    graph: &mut Graph,
+    generators: &mut [Box<dyn Generator + Send>],
+    check: &(dyn Fn(&Graph) -> BTreeMap<NodeId, Vec<String>> + Sync),
+    max_retries: usize,
+    mut rec: Option<&mut Recorder<'_>>,
+) -> Result<Outcome, StoreError> {
     let mut outcome = Outcome {
         filled: Vec::new(),
         failed: Vec::new(),
@@ -79,6 +113,11 @@ pub fn fill_parallel(
             if pending.is_empty() {
                 break;
             }
+            if let Some(r) = rec.as_mut() {
+                for (id, errs) in pending.iter_mut() {
+                    *errs = r.prompt_errors(id, errs)?;
+                }
+            }
             let results = if generators.is_empty() {
                 vec![Err("no generators".to_string()); pending.len()]
             } else {
@@ -98,6 +137,29 @@ pub fn fill_parallel(
             } else {
                 BTreeMap::new()
             };
+            if let Some(r) = rec.as_mut() {
+                let mut tests: Vec<TestOutcome> = Vec::new();
+                for ((id, shown), result) in pending.iter().zip(&results) {
+                    if result.is_ok() {
+                        r.attempt(graph, id, &build_prompt(graph, id, shown))?;
+                        for e in errors.get(id).into_iter().flatten() {
+                            tests.push(TestOutcome {
+                                test: id.clone(),
+                                passed: false,
+                                message: e.clone(),
+                            });
+                        }
+                    }
+                }
+                r.commit(graph, tests)?;
+                for ((id, _), result) in pending.iter().zip(&results) {
+                    let errs = match result {
+                        Err(e) => vec![e.clone()],
+                        Ok(_) => errors.get(id).cloned().unwrap_or_default(),
+                    };
+                    r.note_failures(id, &errs);
+                }
+            }
             let mut next = Vec::new();
             for ((id, _), result) in pending.into_iter().zip(results) {
                 if round > 0 {
@@ -125,7 +187,7 @@ pub fn fill_parallel(
         outcome.retries.extend(attempts);
     }
     outcome.failed.sort();
-    outcome
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -288,5 +350,46 @@ mod tests {
         assert_eq!(out.failed[0].0, NodeId("bad".into()));
         assert!(g.nodes[&NodeId("bad".into())].body.is_none());
         assert_eq!(out.filled, vec![NodeId("ok".into())]);
+    }
+
+    #[test]
+    fn versioned_keeps_both_attempts_and_prompts_with_failure() {
+        use crate::version::MemoryStore;
+        let mut g = sample();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut gens: Vec<Box<dyn Generator + Send>> = vec![Box::new(Fake {
+            log: Some(log.clone()),
+            ..Fake::plain()
+        })];
+        let mut store = MemoryStore::default();
+        let (out, view) = fill_parallel_versioned(
+            &mut g,
+            &mut gens,
+            &check,
+            2,
+            &mut store,
+            &RunId("r".into()),
+            "m",
+            None,
+        )
+        .unwrap();
+        assert!(out.failed.is_empty());
+        let b = NodeId("b".into());
+        let versions = store.versions_of(&b).unwrap();
+        assert_eq!(versions.len(), 2);
+        let first = store.get_version(&versions[0]).unwrap();
+        let second = store.get_version(&versions[1]).unwrap();
+        assert_eq!(first.body.as_deref(), Some("{ BROKEN }"));
+        assert_eq!(second.parent, Some(first.id));
+        assert_eq!(view.versions[&b], second.id);
+        assert!(store
+            .all_results()
+            .unwrap()
+            .iter()
+            .any(|r| r.tests.iter().any(|t| !t.passed && t.message == "broken")));
+        let log = log.lock().unwrap();
+        assert!(log
+            .iter()
+            .any(|p| p.contains("fn b()") && p.contains("broken")));
     }
 }
