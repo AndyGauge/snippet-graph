@@ -133,6 +133,7 @@ struct Args {
     spec: PathBuf,
     crate_dir: PathBuf,
     oracle: Option<PathBuf>,
+    resume: Option<PathBuf>,
     width: usize,
 }
 
@@ -140,10 +141,12 @@ fn parse_args() -> Option<Args> {
     let mut it = std::env::args().skip(1);
     let mut positional = Vec::new();
     let mut oracle = None;
+    let mut resume = None;
     let mut width = DEFAULT_WIDTH;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--oracle" => oracle = Some(PathBuf::from(it.next()?)),
+            "--resume" => resume = Some(PathBuf::from(it.next()?)),
             "--width" => width = it.next()?.parse().ok()?,
             _ => positional.push(a),
         }
@@ -153,8 +156,25 @@ fn parse_args() -> Option<Args> {
         spec: spec.into(),
         crate_dir: dir.into(),
         oracle,
+        resume,
         width,
     })
+}
+
+fn save_state(crate_dir: &Path, graph: &Graph) -> Result<(), String> {
+    let text = serde_json::to_string(graph).map_err(|e| e.to_string())?;
+    std::fs::write(crate_dir.join("sg-state.json"), text).map_err(|e| e.to_string())
+}
+
+fn load_state(path: &Path) -> Result<Graph, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut graph: Graph = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    for node in graph.nodes.values_mut() {
+        if matches!(node.kind, NodeKind::Function | NodeKind::Method) {
+            node.body = None;
+        }
+    }
+    Ok(graph)
 }
 
 fn all_tests(crate_dir: &Path, graph: &Graph) -> TestReport {
@@ -198,20 +218,26 @@ fn run(args: Args) -> Result<bool, String> {
     };
     let crate_dir = args.crate_dir;
 
-    let mut graph = make_skeleton(&mut gen, &crate_dir, &spec)?;
-    eprintln!("skeleton ok: {} nodes", graph.nodes.len());
-
-    let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
-    let untested = testgen::generate_all(
-        &mut graph,
-        &spec,
-        &mut gen,
-        &mut check_tests,
-        TESTGEN_RETRIES,
-    );
-    for (id, why) in &untested {
-        eprintln!("  no tests for {}: {why}", id.0);
-    }
+    let (mut graph, untested) = match &args.resume {
+        Some(path) => (load_state(path)?, Vec::new()),
+        None => {
+            let mut graph = make_skeleton(&mut gen, &crate_dir, &spec)?;
+            eprintln!("skeleton ok: {} nodes", graph.nodes.len());
+            let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
+            let untested = testgen::generate_all(
+                &mut graph,
+                &spec,
+                &mut gen,
+                &mut check_tests,
+                TESTGEN_RETRIES,
+            );
+            for (id, why) in &untested {
+                eprintln!("  no tests for {}: {why}", id.0);
+            }
+            save_state(&crate_dir, &graph)?;
+            (graph, untested)
+        }
+    };
     let test_count = graph
         .nodes
         .values()
@@ -334,7 +360,7 @@ fn run(args: Args) -> Result<bool, String> {
 
 fn main() {
     let Some(args) = parse_args() else {
-        eprintln!("usage: sg <spec.md> <crate_dir> [--oracle file.rs] [--width N]");
+        eprintln!("usage: sg <spec.md> <crate_dir> [--oracle file.rs] [--width N] [--resume sg-state.json]");
         std::process::exit(2);
     };
     match run(args) {
