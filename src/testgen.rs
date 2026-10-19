@@ -251,7 +251,7 @@ pub fn generate_all(
     let subjects: Vec<NodeId> = graph
         .nodes
         .values()
-        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method) && !n.is_filled())
         .map(|n| n.id.clone())
         .collect();
     let mut failed = Vec::new();
@@ -496,7 +496,7 @@ mod tests {
         );
         let mut check = |_: &Graph| report(true, &[("test::add::adds", true)]);
         let failed = generate_all(&mut g, "spec", &mut gen, &mut check, 1);
-        assert_eq!(failed.len(), 2);
+        assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].0, nid("add"));
         assert!(failed[0].1.contains("passed"));
         assert!(!g.nodes.contains_key(&nid("test::add::adds")));
