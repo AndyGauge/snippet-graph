@@ -28,6 +28,7 @@ const SKELETON_ATTEMPTS: usize = 4;
 const FILL_RETRIES: usize = 3;
 const TESTGEN_RETRIES: usize = 3;
 const REPAIR_ROUNDS: usize = 4;
+const MAX_REPAIRS_PER_ROUND: usize = 4;
 const DEFAULT_WIDTH: usize = 4;
 const MAX_TOKENS: u32 = 16000;
 const BENCH_RETRIES: usize = 3;
@@ -403,9 +404,22 @@ fn run(args: Args) -> Result<bool, String> {
             failing(&report),
             suspects.len()
         );
-        let Some(top) = suspects.first() else { break };
-        if let Some(node) = graph.nodes.get_mut(&top.node) {
-            node.body = None;
+        let targets = blame::repair_targets(&graph, &suspects, MAX_REPAIRS_PER_ROUND);
+        if targets.is_empty() {
+            break;
+        }
+        eprintln!(
+            "  retrying {}",
+            targets
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for target in &targets {
+            if let Some(node) = graph.nodes.get_mut(target) {
+                node.body = None;
+            }
         }
         let mut run_tests = |g: &Graph, only: &[NodeId]| {
             verify::run_tests(&crate_dir, &assemble(g), only).unwrap_or_default()

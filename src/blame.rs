@@ -70,6 +70,23 @@ pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId])
     leaves.into_iter().chain(callers).collect()
 }
 
+/// The suspects to retry together in one repair round: those that do not depend
+/// on another suspect, in rank order, at most `limit`. Falls back to the top
+/// suspect when every suspect depends on another (a cycle).
+pub fn repair_targets(graph: &Graph, suspects: &[Suspect], limit: usize) -> Vec<NodeId> {
+    let ids: std::collections::BTreeSet<&NodeId> = suspects.iter().map(|s| &s.node).collect();
+    let mut targets: Vec<NodeId> = suspects
+        .iter()
+        .filter(|s| !graph.dependencies(&s.node).any(|dep| ids.contains(dep)))
+        .take(limit)
+        .map(|s| s.node.clone())
+        .collect();
+    if targets.is_empty() {
+        targets.extend(suspects.first().map(|s| s.node.clone()));
+    }
+    targets
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +223,34 @@ mod tests {
         let ranked = rank(&g, &[out("t_caller", false), out("t_helper", false)], &[]);
         assert_eq!(ranked[0].node, id("helper"));
         assert_eq!(ranked[1].node, id("caller"));
+    }
+
+    #[test]
+    fn repair_targets_are_all_independent_leaves_up_to_limit() {
+        let mut g = graph(&[
+            ("t1", &["a"]),
+            ("t2", &["b"]),
+            ("t3", &["c"]),
+            ("t4", &["d"]),
+        ]);
+        g.add_use(&id("d"), &id("a"));
+        let outcomes: Vec<TestOutcome> = ["t1", "t2", "t3", "t4"]
+            .iter()
+            .map(|t| out(t, false))
+            .collect();
+        let ranked = rank(&g, &outcomes, &[]);
+        let all = repair_targets(&g, &ranked, 10);
+        assert_eq!(all.len(), 3);
+        assert!(!all.contains(&id("d")));
+        assert_eq!(repair_targets(&g, &ranked, 2).len(), 2);
+    }
+
+    #[test]
+    fn repair_targets_fall_back_to_top_suspect_in_a_cycle() {
+        let mut g = graph(&[("t1", &["a"]), ("t2", &["b"])]);
+        g.add_use(&id("a"), &id("b"));
+        g.add_use(&id("b"), &id("a"));
+        let ranked = rank(&g, &[out("t1", false), out("t2", false)], &[]);
+        assert_eq!(repair_targets(&g, &ranked, 5).len(), 1);
     }
 }
