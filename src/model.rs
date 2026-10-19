@@ -13,6 +13,7 @@ pub enum NodeKind {
     Function,
     Method,
     Test,
+    Bench,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,14 +46,16 @@ pub struct Graph {
 impl Node {
     pub fn is_filled(&self) -> bool {
         match self.kind {
-            NodeKind::Function | NodeKind::Method | NodeKind::Test => self.body.is_some(),
+            NodeKind::Function | NodeKind::Method | NodeKind::Test | NodeKind::Bench => {
+                self.body.is_some()
+            }
             _ => true,
         }
     }
 
     pub fn render(&self) -> String {
         match self.kind {
-            NodeKind::Function | NodeKind::Method | NodeKind::Test => {
+            NodeKind::Function | NodeKind::Method | NodeKind::Test | NodeKind::Bench => {
                 let body = self.body.as_deref().unwrap_or("{ todo!() }");
                 format!("{} {}", self.signature, body)
             }
@@ -78,7 +81,7 @@ impl Graph {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestOutcome {
     pub test: NodeId,
     pub passed: bool,

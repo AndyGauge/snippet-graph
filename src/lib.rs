@@ -1,15 +1,23 @@
 pub mod assemble;
+pub mod bench;
+pub mod benchgen;
 pub mod blame;
 pub mod edges;
+pub mod export;
 pub mod fill;
 pub mod import;
 pub mod metrics;
 pub mod model;
 pub mod order;
 pub mod parallel;
+pub mod results;
 pub mod revise;
 pub mod skeleton;
+pub mod store;
 pub mod testgen;
+pub mod variants;
 pub mod verify;
+pub mod version;
+pub mod view;
 
 pub use model::{Graph, Node, NodeId, NodeKind, Placement, TestOutcome, TestReport};
