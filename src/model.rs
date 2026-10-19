@@ -44,6 +44,9 @@ pub struct Graph {
     /// The specification the graph was generated from; included in fill prompts.
     #[serde(default)]
     pub spec: String,
+    /// Nodes that already exist and must never be refilled or blamed.
+    #[serde(default)]
+    pub frozen: BTreeSet<NodeId>,
 }
 
 impl Node {

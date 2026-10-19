@@ -7,6 +7,7 @@ use snippet_graph::blame;
 use snippet_graph::cli;
 use snippet_graph::fill::{fill_all_versioned, Generator};
 use snippet_graph::import::write_back;
+use snippet_graph::lintfix;
 use snippet_graph::metrics::RunMetrics;
 use snippet_graph::parallel::fill_parallel_versioned;
 use snippet_graph::skeleton;
@@ -28,6 +29,7 @@ const SKELETON_ATTEMPTS: usize = 4;
 const FILL_RETRIES: usize = 3;
 const TESTGEN_RETRIES: usize = 3;
 const REPAIR_ROUNDS: usize = 4;
+const LINT_PRUNE_ROUNDS: usize = 3;
 const MAX_REPAIRS_PER_ROUND: usize = 4;
 const DEFAULT_WIDTH: usize = 4;
 const MAX_TOKENS: u32 = 16000;
@@ -99,10 +101,15 @@ fn strip_fences(text: &str) -> String {
         .to_string()
 }
 
-fn skeleton_prompt(spec: &str, errors: &[String], previous: &str) -> String {
+fn skeleton_prompt(spec: &str, prelude: &str, errors: &[String], previous: &str) -> String {
     let mut p = format!(
         "Write the Rust skeleton for this spec as a single lib.rs: all types, consts, use items, and function/method signatures, with every function body exactly `{{ todo!() }}`. No logic. Private helpers that need no state must be free functions, not methods taking `&self`; never add a function whose only purpose is to call other functions. Output only Rust source.\n\nSpec:\n{spec}\n"
     );
+    if !prelude.is_empty() {
+        p.push_str(&format!(
+            "\nThe file already begins with these items, which are finished. Do not repeat or change them; write only the new items that follow them:\n```rust\n{prelude}\n```\n"
+        ));
+    }
     if !errors.is_empty() {
         p.push_str(&format!(
             "\nYour previous skeleton:\n{previous}\n\nIt failed to compile:\n{}\nFix it.\n",
@@ -116,23 +123,50 @@ fn check_graph(crate_dir: &Path, graph: &Graph) -> std::io::Result<verify::Repor
     verify::check(crate_dir, &assemble(graph))
 }
 
+const PRELUDE_GAP: usize = 10_000;
+
+fn with_prelude(prelude: &Graph, mut model: Graph) -> Graph {
+    model.nodes.retain(|id, _| !prelude.nodes.contains_key(id));
+    for node in model.nodes.values_mut() {
+        node.placement.index += PRELUDE_GAP;
+    }
+    let mut combined = prelude.clone();
+    skeleton::merge(&mut combined, model);
+    combined.frozen = prelude.nodes.keys().cloned().collect();
+    combined
+}
+
 fn make_skeleton(
     gen: &mut RegistryGenerator,
     crate_dir: &Path,
     spec: &str,
+    prelude: Option<&str>,
 ) -> Result<Graph, String> {
+    let prelude_text = prelude.unwrap_or_default();
+    let prelude_graph = match prelude {
+        Some(text) => skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| e.to_string())?,
+        None => Graph::default(),
+    };
     let mut errors = Vec::new();
     let mut previous = String::new();
     for attempt in 1..=SKELETON_ATTEMPTS {
         eprintln!("skeleton attempt {attempt}");
-        previous = strip_fences(&gen.generate(&skeleton_prompt(spec, &errors, &previous))?);
-        let graph = match skeleton::parse(Path::new("src/lib.rs"), &previous) {
+        previous = strip_fences(&gen.generate(&skeleton_prompt(
+            spec,
+            prelude_text,
+            &errors,
+            &previous,
+        ))?);
+        let mut graph = match skeleton::parse(Path::new("src/lib.rs"), &previous) {
             Ok(g) => g,
             Err(e) => {
                 errors = vec![e.to_string()];
                 continue;
             }
         };
+        if prelude.is_some() {
+            graph = with_prelude(&prelude_graph, graph);
+        }
         let report = check_graph(crate_dir, &graph).map_err(|e| e.to_string())?;
         if report.ok {
             return Ok(graph);
@@ -154,6 +188,7 @@ struct Args {
     crate_dir: PathBuf,
     oracle: Option<PathBuf>,
     resume: Option<PathBuf>,
+    prelude: Option<PathBuf>,
     store: Option<PathBuf>,
     width: usize,
 }
@@ -204,7 +239,11 @@ impl Flags {
 }
 
 fn parse_args(args: Vec<String>) -> Result<Args, String> {
-    let flags = Flags::parse(args, &["--oracle", "--resume", "--width", "--store"], &[])?;
+    let flags = Flags::parse(
+        args,
+        &["--oracle", "--resume", "--width", "--store", "--prelude"],
+        &[],
+    )?;
     let width = flags.number("--width", DEFAULT_WIDTH)?;
     let [spec, dir] = <[String; 2]>::try_from(flags.positional.clone())
         .map_err(|_| "expected <spec.md> <crate_dir>".to_string())?;
@@ -213,6 +252,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         crate_dir: dir.into(),
         oracle: flags.path("--oracle"),
         resume: flags.path("--resume"),
+        prelude: flags.path("--prelude"),
         store: flags.path("--store"),
         width,
     })
@@ -338,6 +378,10 @@ fn run(args: Args) -> Result<bool, String> {
     let mut store = DirStore::open(&store_dir).map_err(io)?;
     let run_id = new_run_id();
 
+    let prelude_text = match &args.prelude {
+        Some(path) => Some(std::fs::read_to_string(path).map_err(|e| e.to_string())?),
+        None => None,
+    };
     let (mut graph, untested) = match &args.resume {
         Some(path) => {
             let mut graph = load_state(path)?;
@@ -345,7 +389,7 @@ fn run(args: Args) -> Result<bool, String> {
             (graph, Vec::new())
         }
         None => {
-            let mut graph = make_skeleton(&mut gen, &crate_dir, &spec)?;
+            let mut graph = make_skeleton(&mut gen, &crate_dir, &spec, prelude_text.as_deref())?;
             graph.spec = spec.clone();
             eprintln!("skeleton ok: {} nodes", graph.nodes.len());
             let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
@@ -478,6 +522,19 @@ fn run(args: Args) -> Result<bool, String> {
         for (id, n) in again.retries {
             *outcome.retries.entry(id).or_default() += n;
         }
+    }
+
+    for _ in 0..LINT_PRUNE_ROUNDS {
+        let lint = verify::clippy(&crate_dir, &assemble(&graph)).map_err(|e| e.to_string())?;
+        if lint.ok {
+            break;
+        }
+        let removed = lintfix::prune(&mut graph, &lint.by_node);
+        if removed.is_empty() {
+            break;
+        }
+        eprintln!("  pruned {} unused nodes", removed.len());
+        current = record_view(&mut store, &graph, &run_id, Some(&current))?;
     }
 
     let final_report = all_tests(&crate_dir, &graph);

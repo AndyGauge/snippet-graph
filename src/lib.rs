@@ -7,6 +7,7 @@ pub mod edges;
 pub mod export;
 pub mod fill;
 pub mod import;
+pub mod lintfix;
 pub mod metrics;
 pub mod model;
 pub mod order;

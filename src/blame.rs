@@ -24,7 +24,7 @@ pub fn rank(graph: &Graph, outcomes: &[TestOutcome], recently_filled: &[NodeId])
                 .nodes
                 .get(subject)
                 .is_some_and(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method));
-            if !fillable {
+            if !fillable || graph.frozen.contains(subject) {
                 continue;
             }
             let entry = reach.entry(subject).or_default();
