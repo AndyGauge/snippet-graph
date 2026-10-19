@@ -2,6 +2,7 @@ pub mod assemble;
 pub mod bench;
 pub mod benchgen;
 pub mod blame;
+pub mod cli;
 pub mod edges;
 pub mod export;
 pub mod fill;
