@@ -1,4 +1,4 @@
-.PHONY: build test lint check site site-data site-dev site-clean
+.PHONY: publish publish-dry build test lint check site site-data site-dev site-clean
 
 build:
 	cargo build --workspace
@@ -26,3 +26,12 @@ site-dev: site-data
 
 site-clean:
 	rm -rf site/public site/resources site/static/islands site/static/graph site/data/graph.json
+
+publish-dry: check
+	cargo publish --dry-run -p snippet-graph --allow-dirty
+
+publish: publish-dry
+	@test -z "$$(git status --porcelain)" || { echo "commit your changes first"; exit 1; }
+	cargo publish -p snippet-graph
+	@echo "waiting for the index to pick up snippet-graph"; sleep 30
+	cargo publish -p sg-provider-openai
