@@ -1,3 +1,6 @@
+-include .env
+export CARGO_REGISTRY_TOKEN ?= $(PUB_NEW_CRATE_TOKEN)
+
 .PHONY: publish publish-dry build test lint check site site-data site-dev site-clean
 
 build:
@@ -31,6 +34,7 @@ publish-dry: check
 	cargo publish --dry-run -p snippet-graph --allow-dirty
 
 publish: publish-dry
+	@test -n "$$CARGO_REGISTRY_TOKEN" || { echo "no token: put PUB_NEW_CRATE_TOKEN=... in .env"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "commit your changes first"; exit 1; }
 	cargo publish -p snippet-graph
 	@echo "waiting for the index to pick up snippet-graph"; sleep 30
