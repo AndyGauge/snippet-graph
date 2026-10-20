@@ -52,6 +52,10 @@ enableRobotsTXT = false
   pageRef = "/results"
   weight = 60
 [[menus.main]]
+  name = "Attributions"
+  pageRef = "/attributions"
+  weight = 65
+[[menus.main]]
   name = "FAQ"
   pageRef = "/faq"
   weight = 70
