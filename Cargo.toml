@@ -1,6 +1,6 @@
 [package]
 name = "snippet-graph"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.82"
 description = "Build Rust code one function at a time: a compiling skeleton, tests first, repair of the function the tests blame, and a stored history of every attempt."

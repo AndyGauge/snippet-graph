@@ -2,8 +2,10 @@ use crate::assemble::Assembled;
 use crate::model::NodeId;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -169,6 +171,59 @@ fn abort_text(stderr: &str) -> String {
     )
 }
 
+const TEST_TIMEOUT_SECS: u64 = 300;
+
+fn test_timeout() -> Duration {
+    let secs = std::env::var("SG_TEST_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(TEST_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Run `command`, killing it and everything it started if it outlives `limit`.
+/// A generated test can loop forever, and nothing else would stop it.
+fn output_within(command: &mut Command, limit: Duration) -> std::io::Result<(Output, bool)> {
+    use std::os::unix::process::CommandExt;
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()?;
+    let mut out = child.stdout.take().expect("stdout is piped");
+    let mut err = child.stderr.take().expect("stderr is piped");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= limit {
+            timed_out = true;
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", child.id())])
+                .status();
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    Ok((Output { status, stdout, stderr }, timed_out))
+}
+
 /// Write the files, run `cargo test`, and report each test's outcome with its
 /// panic text. A test's id is the Test node whose function name matches.
 /// `only` limits the run to those test nodes (all when empty). Compile errors
@@ -195,7 +250,15 @@ pub fn run_tests(
         let name = names.get(id).map(String::as_str).unwrap_or(id.0.as_str());
         command.arg(name);
     }
-    let output = command.output()?;
+    let limit = test_timeout();
+    let (output, timed_out) = output_within(&mut command, limit)?;
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if timed_out {
+        stderr.push_str(&format!(
+            "\nthe test run was killed after {} seconds; a test is probably in an infinite loop",
+            limit.as_secs()
+        ));
+    }
 
     let mut report = TestReport::default();
     let mut build_ok = true;
@@ -238,7 +301,7 @@ pub fn run_tests(
         }
     }
 
-    let aborted = abort_text(&String::from_utf8_lossy(&output.stderr));
+    let aborted = abort_text(&stderr);
     for name in started {
         if !results.iter().any(|(n, _)| *n == name) {
             results.push((name.clone(), false));
@@ -493,6 +556,26 @@ mod tests {
         assert!(!overflows.passed);
         assert!(overflows.message.contains("aborted"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_past_its_limit_is_killed_with_its_children() {
+        let started = Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo before; sleep 30 & wait"]);
+        let (output, timed_out) = output_within(&mut command, Duration::from_millis(500)).unwrap();
+        assert!(timed_out);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("before"));
+    }
+
+    #[test]
+    fn a_run_inside_its_limit_is_left_alone() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo done"]);
+        let (output, timed_out) = output_within(&mut command, Duration::from_secs(30)).unwrap();
+        assert!(!timed_out);
+        assert!(output.status.success());
     }
 
     #[test]
