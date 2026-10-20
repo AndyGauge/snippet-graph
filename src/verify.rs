@@ -160,10 +160,7 @@ fn leaf(name: &str) -> &str {
 /// A test that starts and never reports took the test process down (a stack
 /// overflow or an abort); the last lines of stderr say how.
 fn abort_text(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
+    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &lines[lines.len().saturating_sub(6)..];
     format!(
         "test aborted the test process without reporting a result:\n{}",
@@ -221,7 +218,14 @@ fn output_within(command: &mut Command, limit: Duration) -> std::io::Result<(Out
     };
     let stdout = out_reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
-    Ok((Output { status, stdout, stderr }, timed_out))
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        timed_out,
+    ))
 }
 
 /// Write the files, run `cargo test`, and report each test's outcome with its
@@ -524,10 +528,18 @@ mod tests {
         let a = assembled(src, &[("add", 1, 1), ("t_adds", 5, 6), ("t_noisy", 7, 12)]);
         let dir = temp_crate("lookalike");
         let report = run_tests(&dir, &a, &[]).unwrap();
-        let adds: Vec<_> = report.outcomes.iter().filter(|o| o.test.0 == "t_adds").collect();
+        let adds: Vec<_> = report
+            .outcomes
+            .iter()
+            .filter(|o| o.test.0 == "t_adds")
+            .collect();
         assert_eq!(adds.len(), 1);
         assert!(adds[0].passed);
-        let noisy = report.outcomes.iter().find(|o| o.test.0 == "t_noisy").unwrap();
+        let noisy = report
+            .outcomes
+            .iter()
+            .find(|o| o.test.0 == "t_noisy")
+            .unwrap();
         assert!(!noisy.passed);
         assert!(noisy.message.contains("real failure"));
         let _ = std::fs::remove_dir_all(dir);

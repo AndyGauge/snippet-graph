@@ -30,7 +30,16 @@ fn parse(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<Settin
             .cloned()
     };
     for a in args {
-        if a.starts_with("--") && !["--base-url", "--model", "--api-key-env", "--channels", "--timeout"].contains(&a.as_str()) {
+        if a.starts_with("--")
+            && ![
+                "--base-url",
+                "--model",
+                "--api-key-env",
+                "--channels",
+                "--timeout",
+            ]
+            .contains(&a.as_str())
+        {
             return Err(format!("unknown option {a}\n\n{USAGE}"));
         }
     }
@@ -43,15 +52,26 @@ fn parse(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<Settin
     let number = |text: Option<String>, default: usize, what: &str| -> Result<usize, String> {
         match text {
             None => Ok(default),
-            Some(t) => t.parse().map_err(|_| format!("{what} must be a number, got {t}")),
+            Some(t) => t
+                .parse()
+                .map_err(|_| format!("{what} must be a number, got {t}")),
         }
     };
     Ok(Settings {
         base_url: base_url.trim_end_matches('/').to_string(),
         model: flag("--model").or_else(|| env("SG_OPENAI_MODEL")),
         api_key: env(&key_var).filter(|k| !k.is_empty()),
-        channels: number(flag("--channels").or_else(|| env("SG_OPENAI_CHANNELS")), 4, "--channels")?.max(1),
-        timeout: Duration::from_secs(number(flag("--timeout").or_else(|| env("SG_OPENAI_TIMEOUT")), 900, "--timeout")? as u64),
+        channels: number(
+            flag("--channels").or_else(|| env("SG_OPENAI_CHANNELS")),
+            4,
+            "--channels",
+        )?
+        .max(1),
+        timeout: Duration::from_secs(number(
+            flag("--timeout").or_else(|| env("SG_OPENAI_TIMEOUT")),
+            900,
+            "--timeout",
+        )? as u64),
     })
 }
 
@@ -75,7 +95,12 @@ fn body(model: &str, r: &Request) -> Value {
 fn completion(reply: &Value) -> Result<Completion, String> {
     let text = reply["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| format!("no text in the reply: {}", reply.to_string().chars().take(200).collect::<String>()))?;
+        .ok_or_else(|| {
+            format!(
+                "no text in the reply: {}",
+                reply.to_string().chars().take(200).collect::<String>()
+            )
+        })?;
     Ok(Completion {
         text: text.to_string(),
         input_tokens: reply["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
@@ -83,10 +108,19 @@ fn completion(reply: &Value) -> Result<Completion, String> {
     })
 }
 
-fn request(agent: &ureq::Agent, s: &Settings, url: &str, payload: Option<&Value>) -> Result<Value, String> {
+fn request(
+    agent: &ureq::Agent,
+    s: &Settings,
+    url: &str,
+    payload: Option<&Value>,
+) -> Result<Value, String> {
     let mut attempt = 0;
     loop {
-        let mut call = if payload.is_some() { agent.post(url) } else { agent.get(url) };
+        let mut call = if payload.is_some() {
+            agent.post(url)
+        } else {
+            agent.get(url)
+        };
         if let Some(key) = &s.api_key {
             call = call.set("Authorization", &format!("Bearer {key}"));
         }
@@ -103,7 +137,10 @@ fn request(agent: &ureq::Agent, s: &Settings, url: &str, payload: Option<&Value>
                     std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
-                return Err(format!("HTTP {code}: {}", text.chars().take(300).collect::<String>()));
+                return Err(format!(
+                    "HTTP {code}: {}",
+                    text.chars().take(300).collect::<String>()
+                ));
             }
             Err(e) => return Err(e.to_string()),
         }
@@ -130,7 +167,10 @@ fn main() -> Result<(), String> {
         Some(m) => m.clone(),
         None => first_model(&agent, &settings)?,
     };
-    eprintln!("sg-provider-openai: {} model {model}, {} channel(s)", settings.base_url, settings.channels);
+    eprintln!(
+        "sg-provider-openai: {} model {model}, {} channel(s)",
+        settings.base_url, settings.channels
+    );
     let url = format!("{}/chat/completions", settings.base_url);
     let channels = settings.channels;
     plugin::serve("openai", channels, move |r| {
@@ -158,14 +198,23 @@ mod tests {
             "MY_KEY" => Some("secret".to_string()),
             _ => None,
         };
-        let s = parse(&args(&["--base-url", "http://h:1/v1/", "--api-key-env", "MY_KEY"]), &env).unwrap();
+        let s = parse(
+            &args(&["--base-url", "http://h:1/v1/", "--api-key-env", "MY_KEY"]),
+            &env,
+        )
+        .unwrap();
         assert_eq!(s.base_url, "http://h:1/v1");
         assert_eq!(s.model.as_deref(), Some("from-env"));
         assert_eq!(s.channels, 6);
         assert_eq!(s.api_key.as_deref(), Some("secret"));
         let d = parse(&[], &|_| None).unwrap();
-        assert_eq!((d.base_url.as_str(), d.channels, d.timeout.as_secs()), ("http://localhost:8001/v1", 4, 900));
-        assert!(parse(&args(&["--bogus"]), &|_| None).unwrap_err().contains("unknown option"));
+        assert_eq!(
+            (d.base_url.as_str(), d.channels, d.timeout.as_secs()),
+            ("http://localhost:8001/v1", 4, 900)
+        );
+        assert!(parse(&args(&["--bogus"]), &|_| None)
+            .unwrap_err()
+            .contains("unknown option"));
         assert!(parse(&args(&["--channels", "many"]), &|_| None).is_err());
     }
 
@@ -184,14 +233,25 @@ mod tests {
         assert_eq!(b["reasoning_effort"], "low");
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][1]["content"], "write it");
-        assert!(body("m", &Request::default()).get("reasoning_effort").is_none());
+        assert!(body("m", &Request::default())
+            .get("reasoning_effort")
+            .is_none());
     }
 
     #[test]
     fn a_reply_gives_text_and_token_counts_and_a_malformed_one_is_an_error() {
         let ok = json!({"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}});
-        assert_eq!(completion(&ok).unwrap(), Completion { text: "hi".into(), input_tokens: 7, output_tokens: 3 });
-        assert!(completion(&json!({"choices":[]})).unwrap_err().contains("no text"));
+        assert_eq!(
+            completion(&ok).unwrap(),
+            Completion {
+                text: "hi".into(),
+                input_tokens: 7,
+                output_tokens: 3
+            }
+        );
+        assert!(completion(&json!({"choices":[]}))
+            .unwrap_err()
+            .contains("no text"));
     }
 
     /// Serves `replies` to successive connections on a local port, returning the request texts.
@@ -212,7 +272,10 @@ mod tests {
                         let len = so_far[..split]
                             .to_lowercase()
                             .lines()
-                            .find_map(|l| l.strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
                             .unwrap_or(0);
                         if got >= split + 4 + len {
                             break;
@@ -254,8 +317,17 @@ mod tests {
         let agent = ureq::AgentBuilder::new().timeout(s.timeout).build();
         let model = first_model(&agent, &s).unwrap();
         assert_eq!(model, "detected-model");
-        let r = Request { prompt: "p".into(), ..Request::default() };
-        let reply = request(&agent, &s, &format!("{url}/chat/completions"), Some(&body(&model, &r))).unwrap();
+        let r = Request {
+            prompt: "p".into(),
+            ..Request::default()
+        };
+        let reply = request(
+            &agent,
+            &s,
+            &format!("{url}/chat/completions"),
+            Some(&body(&model, &r)),
+        )
+        .unwrap();
         assert_eq!(completion(&reply).unwrap().text, "fn x() {}");
         let seen = server.join().unwrap();
         assert!(seen[0].starts_with("GET /v1/models"), "{}", seen[0]);
@@ -269,7 +341,13 @@ mod tests {
         let (url, server) = serve_once(vec![(400, r#"{"error":"bad request"}"#.to_string())]);
         let s = settings(&url);
         let agent = ureq::AgentBuilder::new().timeout(s.timeout).build();
-        let err = request(&agent, &s, &format!("{url}/chat/completions"), Some(&json!({}))).unwrap_err();
+        let err = request(
+            &agent,
+            &s,
+            &format!("{url}/chat/completions"),
+            Some(&json!({})),
+        )
+        .unwrap_err();
         assert!(err.starts_with("HTTP 400"), "{err}");
         assert!(err.contains("bad request"));
         server.join().unwrap();

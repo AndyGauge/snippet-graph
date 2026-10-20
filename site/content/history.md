@@ -16,6 +16,7 @@ The store is a directory of JSON files, `versions/`, `views/` and `results/`, pl
 
 | Command | What it does |
 |---|---|
+| `sg schema <spec.md> <crate> [--guide FILE] [--out FILE]` | Write only the schema: types and signatures with `todo!()` bodies, plus the dependencies they need. Compile errors are traced to the item they sit in and only those items are rewritten |
 | `sg history <store> [--node ID]` | The chain of views, or every version of one node |
 | `sg diff <store> <a> <b>` | Which nodes differ between two views |
 | `sg undo <store> <view>` | The view this one came from |

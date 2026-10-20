@@ -15,17 +15,36 @@ const SECTION_HEADINGS: [&str; 6] = [
 const DUTY_WORDS: [(&str, &[&str]); 4] = [
     (
         "ordering",
-        &["ordered", "sorted", "ascending", "descending", "in order of"],
+        &[
+            "ordered",
+            "sorted",
+            "ascending",
+            "descending",
+            "in order of",
+        ],
     ),
     (
         "exclusion",
         &[
-            "ignored", "skips", "skipped", "excluded", "excluding", "except", "not counted",
+            "ignored",
+            "skips",
+            "skipped",
+            "excluded",
+            "excluding",
+            "except",
+            "not counted",
         ],
     ),
     (
         "filtering",
-        &["only if", "at least one", "that count", "which count", "whose", "filter"],
+        &[
+            "only if",
+            "at least one",
+            "that count",
+            "which count",
+            "whose",
+            "filter",
+        ],
     ),
     ("empty case", &["returns zero", "zero when", "empty"]),
 ];
@@ -66,8 +85,9 @@ fn contract(signature: &str) -> Contract {
         .filter(|t| {
             t.starts_with("* ")
                 || t.starts_with("- ")
-                || t.split_once(['.', ')'])
-                    .is_some_and(|(n, rest)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && rest.starts_with(' '))
+                || t.split_once(['.', ')']).is_some_and(|(n, rest)| {
+                    !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && rest.starts_with(' ')
+                })
         })
         .count();
     let joined = main.join(" ");
@@ -177,9 +197,13 @@ pub fn review_prompt(spec: &str, source: &str, flags: &[Flag], problem: Option<&
 - Every function body, helpers included, is exactly `{ todo!() }`. No logic.\n\
 - Output the complete skeleton file as Rust source only.\n",
     );
-    p.push_str(&format!("\nSpec:\n{spec}\n\nSkeleton:\n```rust\n{source}\n```\n"));
+    p.push_str(&format!(
+        "\nSpec:\n{spec}\n\nSkeleton:\n```rust\n{source}\n```\n"
+    ));
     if let Some(problem) = problem {
-        p.push_str(&format!("\nYour previous rewrite was rejected: {problem}\n"));
+        p.push_str(&format!(
+            "\nYour previous rewrite was rejected: {problem}\n"
+        ));
     }
     p
 }
@@ -198,7 +222,11 @@ fn code_only(signature: &str) -> String {
 /// Why `after` is not an acceptable rewrite of `before`, if it is not: every
 /// earlier node must survive with the same signature (contracts may change).
 fn rejection(before: &Graph, after: &Graph, flags: &[Flag]) -> Option<String> {
-    for (id, old) in before.nodes.iter().filter(|(id, _)| !before.frozen.contains(*id)) {
+    for (id, old) in before
+        .nodes
+        .iter()
+        .filter(|(id, _)| !before.frozen.contains(*id))
+    {
         match after.nodes.get(id) {
             None => return Some(format!("`{}` is missing; keep every item", id.0)),
             Some(new) if code_only(&new.signature) != code_only(&old.signature) => {
@@ -330,7 +358,8 @@ mod tests {
 /// A `MonthSummary` containing the aggregated data and per‑rep statements.
 pub fn month_summary(orders: &[OrderRecord], rates: &[(u32, f64)], year: i32, month: u32) -> MonthSummary";
 
-    const NET_SALES: &str = "/// Sum of the line totals of the order after discount, before tax and shipping.
+    const NET_SALES: &str =
+        "/// Sum of the line totals of the order after discount, before tax and shipping.
 /// Returns `Decimal::ZERO` when the order has no lines.
 pub fn net_sales(order: &OrderRecord) -> Decimal";
 
@@ -420,7 +449,12 @@ pub fn month_summary(orders: &[OrderRecord]) -> MonthSummary";
     fn prompt_names_the_flagged_function_the_spec_and_the_skeleton() {
         let flags = flag_graph(&flagged_graph());
         assert_eq!(flags.len(), 1);
-        let p = review_prompt("SPEC TEXT", "SKELETON TEXT", &flags, Some("it did not compile"));
+        let p = review_prompt(
+            "SPEC TEXT",
+            "SKELETON TEXT",
+            &flags,
+            Some("it did not compile"),
+        );
         assert!(p.contains("`month_summary`"));
         assert!(p.contains("SPEC TEXT") && p.contains("SKELETON TEXT"));
         assert!(p.contains("rejected: it did not compile"));
@@ -429,26 +463,52 @@ pub fn month_summary(orders: &[OrderRecord]) -> MonthSummary";
 
     #[test]
     fn a_good_rewrite_is_accepted_and_noted() {
-        let mut gen = Fake(VecDeque::from(["```rust\nNEW SKELETON\n```".to_string()]), Vec::new());
+        let mut gen = Fake(
+            VecDeque::from(["```rust\nNEW SKELETON\n```".to_string()]),
+            Vec::new(),
+        );
         let mut seen = Vec::new();
         let mut build = |text: &str| {
             seen.push(text.to_string());
             Ok(split_graph())
         };
-        let out = review_skeleton(flagged_graph(), "OLD".into(), "spec", &mut gen, &mut build, 2);
+        let out = review_skeleton(
+            flagged_graph(),
+            "OLD".into(),
+            "spec",
+            &mut gen,
+            &mut build,
+            2,
+        );
         assert_eq!(out.graph.nodes.len(), 3);
         assert_eq!(out.source, "NEW SKELETON");
         assert_eq!(seen, vec!["NEW SKELETON".to_string()]);
         assert_eq!(out.notes.len(), 1);
-        assert!(out.notes[0].contains("`month_summary`") && out.notes[0].contains("1 new functions"));
-        assert_eq!(gen.1.len(), 1, "round two finds nothing flagged and asks nothing");
+        assert!(
+            out.notes[0].contains("`month_summary`") && out.notes[0].contains("1 new functions")
+        );
+        assert_eq!(
+            gen.1.len(),
+            1,
+            "round two finds nothing flagged and asks nothing"
+        );
     }
 
     #[test]
     fn a_rewrite_that_does_not_compile_is_retried_with_the_errors_then_abandoned() {
-        let mut gen = Fake(VecDeque::from(["A".to_string(), "B".to_string()]), Vec::new());
+        let mut gen = Fake(
+            VecDeque::from(["A".to_string(), "B".to_string()]),
+            Vec::new(),
+        );
         let mut build = |_: &str| Err(vec!["error[E0425]: cannot find value".to_string()]);
-        let out = review_skeleton(flagged_graph(), "OLD".into(), "spec", &mut gen, &mut build, 2);
+        let out = review_skeleton(
+            flagged_graph(),
+            "OLD".into(),
+            "spec",
+            &mut gen,
+            &mut build,
+            2,
+        );
         assert_eq!(out.source, "OLD");
         assert_eq!(out.graph.nodes.len(), 2);
         assert!(gen.1[1].contains("did not compile: error[E0425]"));
@@ -458,18 +518,41 @@ pub fn month_summary(orders: &[OrderRecord]) -> MonthSummary";
     #[test]
     fn a_rewrite_that_drops_or_changes_an_item_is_rejected() {
         let missing = graph(&[("month_summary", &month_summary_signature())]);
-        let mut gen = Fake(VecDeque::from(["A".to_string(), "B".to_string()]), Vec::new());
+        let mut gen = Fake(
+            VecDeque::from(["A".to_string(), "B".to_string()]),
+            Vec::new(),
+        );
         let mut build = |_: &str| Ok(missing.clone());
-        let out = review_skeleton(flagged_graph(), "OLD".into(), "spec", &mut gen, &mut build, 1);
+        let out = review_skeleton(
+            flagged_graph(),
+            "OLD".into(),
+            "spec",
+            &mut gen,
+            &mut build,
+            1,
+        );
         assert_eq!(out.source, "OLD");
         assert!(gen.1[1].contains("`net_sales` is missing"));
 
         let mut changed = split_graph();
-        changed.nodes.get_mut(&NodeId("net_sales".into())).unwrap().signature =
-            "pub fn net_sales(order: &OrderRecord, extra: u32) -> Decimal".into();
-        let mut gen = Fake(VecDeque::from(["A".to_string(), "B".to_string()]), Vec::new());
+        changed
+            .nodes
+            .get_mut(&NodeId("net_sales".into()))
+            .unwrap()
+            .signature = "pub fn net_sales(order: &OrderRecord, extra: u32) -> Decimal".into();
+        let mut gen = Fake(
+            VecDeque::from(["A".to_string(), "B".to_string()]),
+            Vec::new(),
+        );
         let mut build = |_: &str| Ok(changed.clone());
-        let out = review_skeleton(flagged_graph(), "OLD".into(), "spec", &mut gen, &mut build, 1);
+        let out = review_skeleton(
+            flagged_graph(),
+            "OLD".into(),
+            "spec",
+            &mut gen,
+            &mut build,
+            1,
+        );
         assert_eq!(out.source, "OLD");
         assert!(gen.1[1].contains("signature of `net_sales` changed"));
     }
@@ -477,9 +560,19 @@ pub fn month_summary(orders: &[OrderRecord]) -> MonthSummary";
     #[test]
     fn a_rewrite_that_splits_nothing_is_rejected() {
         let same = flagged_graph();
-        let mut gen = Fake(VecDeque::from(["A".to_string(), "B".to_string()]), Vec::new());
+        let mut gen = Fake(
+            VecDeque::from(["A".to_string(), "B".to_string()]),
+            Vec::new(),
+        );
         let mut build = |_: &str| Ok(same.clone());
-        let out = review_skeleton(flagged_graph(), "OLD".into(), "spec", &mut gen, &mut build, 1);
+        let out = review_skeleton(
+            flagged_graph(),
+            "OLD".into(),
+            "spec",
+            &mut gen,
+            &mut build,
+            1,
+        );
         assert!(gen.1[1].contains("nothing was split"));
         assert_eq!(out.notes.len(), 1);
     }

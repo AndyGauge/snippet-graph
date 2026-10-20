@@ -169,7 +169,9 @@ pub fn render(graph: &Graph, reports: &[NodeReport]) -> String {
     if start.is_empty() {
         out.push_str("Nothing is blocked.\n\n");
     } else {
-        out.push_str("## Start here\n\nNot passing, with every function they use already passing:\n\n");
+        out.push_str(
+            "## Start here\n\nNot passing, with every function they use already passing:\n\n",
+        );
         for id in &start {
             out.push_str(&format!("- `{}`\n", id.0));
         }
@@ -219,7 +221,10 @@ fn commit_message(
         })
         .unwrap_or_default();
     let Some(previous) = previous else {
-        return format!("view {short}: skeleton, {} nodes{tests}", view.versions.len());
+        return format!(
+            "view {short}: skeleton, {} nodes{tests}",
+            view.versions.len()
+        );
     };
     let changed = diff(previous, view);
     let mut msg = format!("view {short}: {} nodes changed{tests}\n\n", changed.len());
@@ -355,9 +360,10 @@ mod tests {
         let mut report = failing_report();
         report.compiled = false;
         report.outcomes.clear();
-        report
-            .build_errors
-            .insert(NodeId("leaf".into()), vec!["error[E0308]: mismatched".into()]);
+        report.build_errors.insert(
+            NodeId("leaf".into()),
+            vec!["error[E0308]: mismatched".into()],
+        );
         let reports = node_reports(&g, &report, &BTreeMap::new(), &MemoryStore::default());
         assert_eq!(by_name(&reports, "leaf").status, Status::DoesNotCompile);
         assert_eq!(by_name(&reports, "mid").status, Status::Unverified);
@@ -366,7 +372,12 @@ mod tests {
     #[test]
     fn start_here_skips_nodes_blocked_by_a_failing_dependency() {
         let g = graph();
-        let reports = node_reports(&g, &failing_report(), &BTreeMap::new(), &MemoryStore::default());
+        let reports = node_reports(
+            &g,
+            &failing_report(),
+            &BTreeMap::new(),
+            &MemoryStore::default(),
+        );
         assert_eq!(start_here(&g, &reports), vec![NodeId("mid".into())]);
         let text = render(&g, &reports);
         assert!(text.contains("1 of 3 functions pass"));
@@ -380,7 +391,12 @@ mod tests {
         let mut g = graph();
         let lines: String = (0..32).map(|i| format!("let v{i} = {i};\n")).collect();
         g.nodes.get_mut(&NodeId("leaf".into())).unwrap().body = Some(format!("{{\n{lines} v0 }}"));
-        let reports = node_reports(&g, &failing_report(), &BTreeMap::new(), &MemoryStore::default());
+        let reports = node_reports(
+            &g,
+            &failing_report(),
+            &BTreeMap::new(),
+            &MemoryStore::default(),
+        );
         assert_eq!(by_name(&reports, "leaf").structure.len(), 1);
         let text = render(&g, &reports);
         assert!(text.contains("## Structure"));
@@ -400,11 +416,13 @@ mod tests {
         let mut store = MemoryStore::default();
         let mut g = graph();
         g.nodes.get_mut(&NodeId("top".into())).unwrap().body = None;
-        let first = crate::view::from_graph(&mut store, &g, &RunId("r".into()), &origin, None).unwrap();
+        let first =
+            crate::view::from_graph(&mut store, &g, &RunId("r".into()), &origin, None).unwrap();
         store.put_view(first.clone()).unwrap();
         g.nodes.get_mut(&NodeId("top".into())).unwrap().body = Some("{ mid() }".into());
         let second =
-            crate::view::from_graph(&mut store, &g, &RunId("r".into()), &origin, Some(&first)).unwrap();
+            crate::view::from_graph(&mut store, &g, &RunId("r".into()), &origin, Some(&first))
+                .unwrap();
         store.put_view(second.clone()).unwrap();
 
         write_repo(&store, &second.id, None, &dir, "# Handoff\n").unwrap();
@@ -419,7 +437,9 @@ mod tests {
         assert!(log.contains("handoff report"));
         assert!(log.contains("nodes changed"));
         assert!(dir.join("HANDOFF.md").exists());
-        assert!(std::fs::read_to_string(dir.join("src/lib.rs")).unwrap().contains("mid()"));
+        assert!(std::fs::read_to_string(dir.join("src/lib.rs"))
+            .unwrap()
+            .contains("mid()"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

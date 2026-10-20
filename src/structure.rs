@@ -130,10 +130,16 @@ pub fn marker(body: &str) -> Option<String> {
 fn over_limits(m: &Measure) -> Vec<String> {
     let mut out = Vec::new();
     if m.code_lines > MAX_CODE_LINES {
-        out.push(format!("{} lines of code (limit {MAX_CODE_LINES})", m.code_lines));
+        out.push(format!(
+            "{} lines of code (limit {MAX_CODE_LINES})",
+            m.code_lines
+        ));
     }
     if m.complexity > MAX_COMPLEXITY {
-        out.push(format!("complexity {} (limit {MAX_COMPLEXITY})", m.complexity));
+        out.push(format!(
+            "complexity {} (limit {MAX_COMPLEXITY})",
+            m.complexity
+        ));
     }
     if m.depth > MAX_DEPTH {
         out.push(format!("nesting {} deep (limit {MAX_DEPTH})", m.depth));
@@ -242,7 +248,8 @@ mod tests {
     #[test]
     fn marker_reason_is_parsed() {
         let lines: String = (0..9).map(|i| format!("    let v{i} = {i};\n")).collect();
-        let body = format!("{{\n    // TODO: does too much: filters, sorts and sums\n{lines}    v0\n}}");
+        let body =
+            format!("{{\n    // TODO: does too much: filters, sorts and sums\n{lines}    v0\n}}");
         assert_eq!(marker(&body).as_deref(), Some("filters, sorts and sums"));
         let findings = evaluate_body(&id(), &body);
         assert_eq!(findings[0].kind, Kind::Marker);
@@ -251,14 +258,18 @@ mod tests {
 
     #[test]
     fn marker_on_a_trivial_body_is_ignored() {
-        let body = "{\n    // TODO: does too much: sums\n    order.lines.iter().map(line_total).sum()\n}";
+        let body =
+            "{\n    // TODO: does too much: sums\n    order.lines.iter().map(line_total).sum()\n}";
         assert!(marker(body).is_some());
         assert!(evaluate_body(&id(), body).is_empty());
     }
 
     #[test]
     fn marker_without_reason_and_other_comments() {
-        assert_eq!(marker("{ // TODO this method does too much\n x }").as_deref(), Some(""));
+        assert_eq!(
+            marker("{ // TODO this method does too much\n x }").as_deref(),
+            Some("")
+        );
         assert_eq!(marker("{ // TODO: later\n x }"), None);
         assert_eq!(marker("{ // does too much\n x }"), None);
         assert_eq!(marker("{ let x = 1; // TODO: does too much\n x }"), None);
@@ -314,10 +325,12 @@ mod tests {
                 index: 0,
             },
         };
-        g.nodes.insert(NodeId("f".into()), mk("f", NodeKind::Function));
+        g.nodes
+            .insert(NodeId("f".into()), mk("f", NodeKind::Function));
         for i in 0..6 {
             let name = format!("f_case{i}");
-            g.nodes.insert(NodeId(name.clone()), mk(&name, NodeKind::Test));
+            g.nodes
+                .insert(NodeId(name.clone()), mk(&name, NodeKind::Test));
             g.uses
                 .entry(NodeId(name))
                 .or_default()
@@ -325,7 +338,8 @@ mod tests {
         }
         for i in 0..6 {
             let name = format!("caller_case{i}");
-            g.nodes.insert(NodeId(name.clone()), mk(&name, NodeKind::Test));
+            g.nodes
+                .insert(NodeId(name.clone()), mk(&name, NodeKind::Test));
             g.uses
                 .entry(NodeId(name))
                 .or_default()

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0
+
+- `sg schema <spec.md> <crate_dir>` writes a compiling schema (types, constants and signatures with `todo!()` bodies) and prints it with its `[dependencies]`. The model writes one draft; after that each compile error is traced to the item it sits in and only the failing items are rewritten, so one bad type no longer costs the ones that were right. The same builder is available as `snippet_graph::schema::build`.
+
 ## 0.1.1
 
 - A test run that outlives 300 seconds (`SG_TEST_TIMEOUT` to change it) is killed along with its children, and the test that was running is reported as failed with a note that it is probably in an infinite loop. Before, one looping generated test stalled the whole run indefinitely.

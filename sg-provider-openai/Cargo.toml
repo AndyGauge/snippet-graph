@@ -1,6 +1,6 @@
 [package]
 name = "sg-provider-openai"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.82"
 description = "A snippet-graph provider for any OpenAI-compatible chat endpoint (llama.cpp, vLLM, hosted APIs)"
@@ -11,6 +11,6 @@ keywords = ["llm", "openai", "snippet-graph"]
 categories = ["development-tools"]
 
 [dependencies]
-snippet-graph = { version = "0.1.1", path = ".." }
+snippet-graph = { version = "0.2.0", path = ".." }
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"

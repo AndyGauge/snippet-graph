@@ -5,17 +5,18 @@ use snippet_graph::blame;
 use snippet_graph::cli;
 use snippet_graph::fill::{fill_all_versioned, Generator};
 use snippet_graph::handoff;
-use snippet_graph::structure;
 use snippet_graph::import::write_back;
 use snippet_graph::ledger;
 use snippet_graph::lintfix;
 use snippet_graph::metrics::RunMetrics;
-use snippet_graph::repo_graph;
-use snippet_graph::review;
 use snippet_graph::parallel::fill_parallel_versioned;
 use snippet_graph::plugin::{self, Plugin, PluginGenerator};
+use snippet_graph::repo_graph;
+use snippet_graph::review;
+use snippet_graph::schema;
 use snippet_graph::skeleton;
 use snippet_graph::store::DirStore;
+use snippet_graph::structure;
 use snippet_graph::testgen;
 use snippet_graph::variants::{self, Evaluation};
 use snippet_graph::verify;
@@ -40,6 +41,7 @@ const BENCH_RETRIES: usize = 3;
 const MODEL: &str = "sg";
 const USAGE: &str = "usage:
   sg [run] <spec.md> <crate_dir> [--oracle file.rs] [--width N] [--resume sg-state.json] [--prelude file.rs] [--store DIR] [--handoff DIR] [--no-review] [--provider NAME] [--provider-args ARGS]
+  sg schema <spec.md> <crate_dir> [--guide FILE] [--out FILE] [--rounds N] [--provider NAME] [--provider-args ARGS]
   sg history <store> [--node ID]
   sg diff <store> <a> <b>
   sg graph [--out FILE] [--root DIR] <crate_dir>...
@@ -96,7 +98,8 @@ fn build_skeleton(
     text: &str,
     prelude: Option<&Graph>,
 ) -> Result<Graph, Vec<String>> {
-    let mut graph = skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| vec![e.to_string()])?;
+    let mut graph =
+        skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| vec![e.to_string()])?;
     if let Some(prelude) = prelude {
         graph = with_prelude(prelude, graph);
     }
@@ -122,9 +125,9 @@ fn make_skeleton(
 ) -> Result<(Graph, Vec<String>), String> {
     let prelude_text = prelude.unwrap_or_default();
     let prelude_graph = match prelude {
-        Some(text) => Some(
-            skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| e.to_string())?,
-        ),
+        Some(text) => {
+            Some(skeleton::parse(Path::new("src/lib.rs"), text).map_err(|e| e.to_string())?)
+        }
         None => None,
     };
     let mut errors = Vec::new();
@@ -226,10 +229,23 @@ impl Flags {
 fn parse_args(args: Vec<String>) -> Result<Args, String> {
     let flags = Flags::parse(
         args,
-        &["--oracle", "--resume", "--width", "--store", "--prelude", "--handoff", "--provider", "--provider-args"],
+        &[
+            "--oracle",
+            "--resume",
+            "--width",
+            "--store",
+            "--prelude",
+            "--handoff",
+            "--provider",
+            "--provider-args",
+        ],
         &["--no-review"],
     )?;
-    let width = flags.values.get("--width").map(|_| flags.number("--width", 0usize)).transpose()?;
+    let width = flags
+        .values
+        .get("--width")
+        .map(|_| flags.number("--width", 0usize))
+        .transpose()?;
     let [spec, dir] = <[String; 2]>::try_from(flags.positional.clone())
         .map_err(|_| "expected <spec.md> <crate_dir>".to_string())?;
     Ok(Args {
@@ -384,7 +400,11 @@ fn run(args: Args) -> Result<bool, String> {
             (graph, Vec::new(), Vec::new())
         }
         None => {
-            let rounds = if args.review { review::MAX_REVIEW_ROUNDS } else { 0 };
+            let rounds = if args.review {
+                review::MAX_REVIEW_ROUNDS
+            } else {
+                0
+            };
             let (mut graph, review_notes) =
                 make_skeleton(&mut gen, &crate_dir, &spec, prelude_text.as_deref(), rounds)?;
             graph.spec = spec.clone();
@@ -592,7 +612,11 @@ fn run(args: Args) -> Result<bool, String> {
             swaps.len(),
             failing(&before),
             failing(&after),
-            if better { "" } else { " (kept the current code)" }
+            if better {
+                ""
+            } else {
+                " (kept the current code)"
+            }
         );
         if better {
             graph = candidate;
@@ -694,6 +718,56 @@ fn review_section(notes: &[String]) -> String {
     out
 }
 
+fn schema_cmd(args: Vec<String>) -> Result<(), String> {
+    let flags = Flags::parse(
+        args,
+        &[
+            "--guide",
+            "--out",
+            "--rounds",
+            "--provider",
+            "--provider-args",
+        ],
+        &[],
+    )?;
+    let [spec, dir] = <[String; 2]>::try_from(flags.positional.clone())
+        .map_err(|_| "expected <spec.md> <crate_dir>".to_string())?;
+    let spec = std::fs::read_to_string(&spec).map_err(|e| format!("{spec}: {e}"))?;
+    let guide = match flags.path("--guide") {
+        Some(path) => {
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        None => String::new(),
+    };
+    let rounds = flags.number("--rounds", schema::REPAIR_ROUNDS)?;
+    let plugin = open_plugin(
+        flags.values.get("--provider").map(String::as_str),
+        flags.values.get("--provider-args").map(String::as_str),
+    )?;
+    let mut gen = plugin.generator(None);
+    let crate_dir = PathBuf::from(dir);
+    let built = schema::build(
+        &crate_dir,
+        &spec,
+        &guide,
+        &mut gen,
+        &mut |g: &Graph| check_graph(&crate_dir, g),
+        rounds,
+    )?;
+    for note in &built.notes {
+        eprintln!("schema: {note}");
+    }
+    eprintln!("schema ok: {} items", built.graph.nodes.len());
+    let text = schema::render(&built);
+    match flags.path("--out") {
+        Some(path) => {
+            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
 fn history_cmd(args: Vec<String>) -> Result<(), String> {
     let flags = Flags::parse(args, &["--node"], &[])?;
     let [store] = <[String; 1]>::try_from(flags.positional.clone())
@@ -710,7 +784,10 @@ fn graph_cmd(args: Vec<String>) -> Result<(), String> {
         return Err("expected at least one <crate_dir>".to_string());
     }
     let dirs: Vec<PathBuf> = flags.positional.iter().map(PathBuf::from).collect();
-    let root = flags.values.get("--root").map_or(PathBuf::from("."), PathBuf::from);
+    let root = flags
+        .values
+        .get("--root")
+        .map_or(PathBuf::from("."), PathBuf::from);
     let graph = repo_graph::build(&dirs, &root)?;
     let text = serde_json::to_string_pretty(&graph).map_err(|e| e.to_string())?;
     match flags.values.get("--out") {
@@ -791,7 +868,16 @@ fn export_cmd(args: Vec<String>) -> Result<(), String> {
 fn ab_cmd(args: Vec<String>) -> Result<(), String> {
     let flags = Flags::parse(
         args,
-        &["--spec", "--crate", "--n", "--runs", "--noise", "--width", "--provider", "--provider-args"],
+        &[
+            "--spec",
+            "--crate",
+            "--n",
+            "--runs",
+            "--noise",
+            "--width",
+            "--provider",
+            "--provider-args",
+        ],
         &[],
     )?;
     let [store_dir, view_arg, node_arg] = <[String; 3]>::try_from(flags.positional.clone())
@@ -945,7 +1031,8 @@ fn dispatch(args: Vec<String>) -> Result<bool, String> {
     let mut args = args;
     let command = args.first().cloned().unwrap_or_default();
     let known = [
-        "history", "diff", "graph", "failures", "good", "sweep", "undo", "swap", "export", "ab", "edit", "run",
+        "schema", "history", "diff", "graph", "failures", "good", "sweep", "undo", "swap",
+        "export", "ab", "edit", "run",
     ];
     if !known.contains(&command.as_str()) {
         return run(parse_args(args)?);
@@ -953,6 +1040,7 @@ fn dispatch(args: Vec<String>) -> Result<bool, String> {
     args.remove(0);
     match command.as_str() {
         "run" => return run(parse_args(args)?),
+        "schema" => schema_cmd(args)?,
         "history" => history_cmd(args)?,
         "diff" => diff_cmd(args)?,
         "graph" => graph_cmd(args)?,

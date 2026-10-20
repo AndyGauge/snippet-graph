@@ -357,7 +357,11 @@ fn version_label(node: &NodeId, version: &VersionId) -> String {
 
 /// The failure ledger as text, optionally for one node and optionally only the
 /// failures still open.
-pub fn failures(store: &dyn Store, node: Option<&NodeId>, open_only: bool) -> Result<String, String> {
+pub fn failures(
+    store: &dyn Store,
+    node: Option<&NodeId>,
+    open_only: bool,
+) -> Result<String, String> {
     let all = ledger::ledger(store).map_err(|e| e.to_string())?;
     let mut out = String::new();
     for f in all

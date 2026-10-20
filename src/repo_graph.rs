@@ -31,7 +31,10 @@ impl Kind {
         matches!(self, Kind::Fn | Kind::Method | Kind::Test)
     }
     fn is_type(&self) -> bool {
-        matches!(self, Kind::Struct | Kind::Enum | Kind::Trait | Kind::TypeAlias)
+        matches!(
+            self,
+            Kind::Struct | Kind::Enum | Kind::Trait | Kind::TypeAlias
+        )
     }
 }
 
@@ -107,8 +110,16 @@ fn slice(lines: &[&str], from: LineColumn, to: LineColumn) -> String {
     for n in from.line..=to.line.min(lines.len()) {
         let line = lines[n - 1];
         let chars: Vec<char> = line.chars().collect();
-        let start = if n == from.line { from.column.min(chars.len()) } else { 0 };
-        let end = if n == to.line { to.column.min(chars.len()) } else { chars.len() };
+        let start = if n == from.line {
+            from.column.min(chars.len())
+        } else {
+            0
+        };
+        let end = if n == to.line {
+            to.column.min(chars.len())
+        } else {
+            chars.len()
+        };
         out.push(chars[start..end.max(start)].iter().collect::<String>());
     }
     out.join("\n")
@@ -127,7 +138,13 @@ fn whole_lines(lines: &[&str], from: usize, to: usize) -> String {
         .unwrap_or(0);
     block
         .iter()
-        .map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() })
+        .map(|l| {
+            if l.len() >= indent {
+                &l[indent..]
+            } else {
+                l.trim_start()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -139,7 +156,11 @@ fn doc_of(attrs: &[syn::Attribute]) -> String {
             continue;
         }
         if let syn::Meta::NameValue(nv) = &a.meta {
-            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+            if let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+            {
                 let line = s.value();
                 out.push(line.strip_prefix(' ').unwrap_or(&line).to_string());
             }
@@ -153,9 +174,9 @@ fn is_test(attrs: &[syn::Attribute]) -> bool {
 }
 
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        a.path().is_ident("cfg") && a.meta.to_token_stream_string().contains("test")
-    })
+    attrs
+        .iter()
+        .any(|a| a.path().is_ident("cfg") && a.meta.to_token_stream_string().contains("test"))
 }
 
 trait MetaText {
@@ -224,9 +245,9 @@ impl<'ast> Visit<'ast> for Scan {
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         match &*call.receiver {
-            syn::Expr::Path(p) if p.path.is_ident("self") => {
-                self.calls.push(vec!["Self".to_string(), call.method.to_string()])
-            }
+            syn::Expr::Path(p) if p.path.is_ident("self") => self
+                .calls
+                .push(vec!["Self".to_string(), call.method.to_string()]),
             _ => self.methods.push(call.method.to_string()),
         }
         for arg in &call.args {
@@ -241,7 +262,9 @@ impl<'ast> Visit<'ast> for Scan {
         let segs = path_segments(&p.path);
         let constant = segs.len() == 1
             && segs[0].chars().any(|c| c.is_ascii_uppercase())
-            && segs[0].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+            && segs[0]
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
         if segs.len() >= 2 || constant {
             self.calls.push(segs);
         }
@@ -301,7 +324,15 @@ impl Collector<'_> {
         });
     }
 
-    fn function(&mut self, owner: Option<&str>, attrs: &[syn::Attribute], vis: &syn::Visibility, sig: &syn::Signature, block: &syn::Block, whole: &dyn Spanned) {
+    fn function(
+        &mut self,
+        owner: Option<&str>,
+        attrs: &[syn::Attribute],
+        vis: &syn::Visibility,
+        sig: &syn::Signature,
+        block: &syn::Block,
+        whole: &dyn Spanned,
+    ) {
         let name = sig.ident.to_string();
         let kind = if is_test(attrs) {
             Kind::Test
@@ -312,7 +343,11 @@ impl Collector<'_> {
         };
         let start = whole.span().start();
         let end = whole.span().end();
-        let sig_start = if is_public(vis) { vis.span().start() } else { sig.span().start() };
+        let sig_start = if is_public(vis) {
+            vis.span().start()
+        } else {
+            sig.span().start()
+        };
         let signature = slice(&self.lines, sig_start, sig.span().end());
         let mut scan = Scan::default();
         scan.visit_block(block);
@@ -340,7 +375,15 @@ impl Collector<'_> {
         self.push(node, scan);
     }
 
-    fn typed(&mut self, kind: Kind, name: &str, attrs: &[syn::Attribute], vis: &syn::Visibility, item: &dyn Spanned, scan_item: &dyn Fn(&mut Scan)) {
+    fn typed(
+        &mut self,
+        kind: Kind,
+        name: &str,
+        attrs: &[syn::Attribute],
+        vis: &syn::Visibility,
+        item: &dyn Spanned,
+        scan_item: &dyn Fn(&mut Scan),
+    ) {
         let start = item.span().start();
         let end = item.span().end();
         let mut scan = Scan::default();
@@ -380,19 +423,50 @@ impl Collector<'_> {
         for item in items {
             match item {
                 syn::Item::Fn(f) => self.function(None, &f.attrs, &f.vis, &f.sig, &f.block, f),
-                syn::Item::Struct(s) => {
-                    self.typed(Kind::Struct, &s.ident.to_string(), &s.attrs, &s.vis, s, &|sc| sc.visit_fields(&s.fields))
-                }
-                syn::Item::Enum(e) => {
-                    self.typed(Kind::Enum, &e.ident.to_string(), &e.attrs, &e.vis, e, &|sc| {
+                syn::Item::Struct(s) => self.typed(
+                    Kind::Struct,
+                    &s.ident.to_string(),
+                    &s.attrs,
+                    &s.vis,
+                    s,
+                    &|sc| sc.visit_fields(&s.fields),
+                ),
+                syn::Item::Enum(e) => self.typed(
+                    Kind::Enum,
+                    &e.ident.to_string(),
+                    &e.attrs,
+                    &e.vis,
+                    e,
+                    &|sc| {
                         for v in &e.variants {
                             sc.visit_fields(&v.fields);
                         }
-                    })
-                }
-                syn::Item::Trait(t) => self.typed(Kind::Trait, &t.ident.to_string(), &t.attrs, &t.vis, t, &|_| {}),
-                syn::Item::Const(c) => self.typed(Kind::Const, &c.ident.to_string(), &c.attrs, &c.vis, c, &|sc| sc.visit_type(&c.ty)),
-                syn::Item::Type(t) => self.typed(Kind::TypeAlias, &t.ident.to_string(), &t.attrs, &t.vis, t, &|sc| sc.visit_type(&t.ty)),
+                    },
+                ),
+                syn::Item::Trait(t) => self.typed(
+                    Kind::Trait,
+                    &t.ident.to_string(),
+                    &t.attrs,
+                    &t.vis,
+                    t,
+                    &|_| {},
+                ),
+                syn::Item::Const(c) => self.typed(
+                    Kind::Const,
+                    &c.ident.to_string(),
+                    &c.attrs,
+                    &c.vis,
+                    c,
+                    &|sc| sc.visit_type(&c.ty),
+                ),
+                syn::Item::Type(t) => self.typed(
+                    Kind::TypeAlias,
+                    &t.ident.to_string(),
+                    &t.attrs,
+                    &t.vis,
+                    t,
+                    &|sc| sc.visit_type(&t.ty),
+                ),
                 syn::Item::Impl(imp) => {
                     let owner = match &*imp.self_ty {
                         syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
@@ -431,7 +505,13 @@ fn normalise(current: &[String], segs: &[String]) -> Option<Vec<String>> {
     let first = segs.first()?;
     match first.as_str() {
         "crate" => Some(segs[1..].to_vec()),
-        "self" => Some(current.iter().cloned().chain(segs[1..].iter().cloned()).collect()),
+        "self" => Some(
+            current
+                .iter()
+                .cloned()
+                .chain(segs[1..].iter().cloned())
+                .collect(),
+        ),
         "super" => {
             let mut base: Vec<String> = current.to_vec();
             let mut rest = segs;
@@ -461,23 +541,57 @@ impl<'a> Resolver<'a> {
         let mut types: HashMap<(String, String), Vec<usize>> = HashMap::new();
         for (i, r) in raws.iter().enumerate() {
             let n = &r.node;
-            index.insert((n.crate_name.clone(), n.module.clone(), n.owner.clone(), n.name.clone()), i);
+            index.insert(
+                (
+                    n.crate_name.clone(),
+                    n.module.clone(),
+                    n.owner.clone(),
+                    n.name.clone(),
+                ),
+                i,
+            );
             if n.kind.is_callable() && n.owner.is_none() {
-                by_name.entry((n.crate_name.clone(), n.name.clone())).or_default().push(i);
+                by_name
+                    .entry((n.crate_name.clone(), n.name.clone()))
+                    .or_default()
+                    .push(i);
             }
             if n.kind == Kind::Method || (n.kind == Kind::Test && n.owner.is_some()) {
-                methods.entry((n.crate_name.clone(), n.name.clone())).or_default().push(i);
+                methods
+                    .entry((n.crate_name.clone(), n.name.clone()))
+                    .or_default()
+                    .push(i);
             }
             if n.kind.is_type() {
-                types.entry((n.crate_name.clone(), n.name.clone())).or_default().push(i);
+                types
+                    .entry((n.crate_name.clone(), n.name.clone()))
+                    .or_default()
+                    .push(i);
             }
         }
-        Resolver { raws, index, by_name, methods, types }
+        Resolver {
+            raws,
+            index,
+            by_name,
+            methods,
+            types,
+        }
     }
 
-    fn lookup(&self, krate: &str, module: &[String], owner: Option<&str>, name: &str) -> Option<usize> {
+    fn lookup(
+        &self,
+        krate: &str,
+        module: &[String],
+        owner: Option<&str>,
+        name: &str,
+    ) -> Option<usize> {
         self.index
-            .get(&(krate.to_string(), module.join("::"), owner.map(str::to_string), name.to_string()))
+            .get(&(
+                krate.to_string(),
+                module.join("::"),
+                owner.map(str::to_string),
+                name.to_string(),
+            ))
             .copied()
     }
 
@@ -574,14 +688,95 @@ const POSSIBLE_LIMIT: usize = 3;
 /// there is no telling `vec.push(x)` from the crate's own `push`, so a call to one of these
 /// is never matched by name (it is still found through `self.`).
 const COMMON_METHODS: &[&str] = &[
-    "push", "pop", "insert", "remove", "get", "get_mut", "len", "is_empty", "iter", "iter_mut", "into_iter",
-    "map", "filter", "collect", "clone", "to_string", "to_owned", "into", "from", "unwrap", "expect", "join",
-    "split", "trim", "contains", "extend", "push_str", "lock", "send", "recv", "read", "write", "flush", "take",
-    "replace", "entry", "keys", "values", "sort", "sort_by", "first", "last", "next", "any", "all", "find",
-    "position", "min", "max", "sum", "count", "cloned", "copied", "or_default", "or_insert", "as_str", "as_ref",
-    "borrow", "display", "new", "default", "load", "store", "fetch_add", "set", "add", "run", "call", "name",
-    "kind", "text", "path", "id", "parse", "lines", "chars", "bytes", "starts_with", "ends_with", "retain",
-    "drain", "clear", "extend_from_slice", "reverse", "dedup", "truncate", "append", "concat", "format",
+    "push",
+    "pop",
+    "insert",
+    "remove",
+    "get",
+    "get_mut",
+    "len",
+    "is_empty",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "map",
+    "filter",
+    "collect",
+    "clone",
+    "to_string",
+    "to_owned",
+    "into",
+    "from",
+    "unwrap",
+    "expect",
+    "join",
+    "split",
+    "trim",
+    "contains",
+    "extend",
+    "push_str",
+    "lock",
+    "send",
+    "recv",
+    "read",
+    "write",
+    "flush",
+    "take",
+    "replace",
+    "entry",
+    "keys",
+    "values",
+    "sort",
+    "sort_by",
+    "first",
+    "last",
+    "next",
+    "any",
+    "all",
+    "find",
+    "position",
+    "min",
+    "max",
+    "sum",
+    "count",
+    "cloned",
+    "copied",
+    "or_default",
+    "or_insert",
+    "as_str",
+    "as_ref",
+    "borrow",
+    "display",
+    "new",
+    "default",
+    "load",
+    "store",
+    "fetch_add",
+    "set",
+    "add",
+    "run",
+    "call",
+    "name",
+    "kind",
+    "text",
+    "path",
+    "id",
+    "parse",
+    "lines",
+    "chars",
+    "bytes",
+    "starts_with",
+    "ends_with",
+    "retain",
+    "drain",
+    "clear",
+    "extend_from_slice",
+    "reverse",
+    "dedup",
+    "truncate",
+    "append",
+    "concat",
+    "format",
 ];
 
 /// Build the graph from already-read source files.
@@ -606,7 +801,11 @@ pub fn analyse(files: &[SourceFile]) -> Result<RepoGraph, String> {
         for segs in &r.calls {
             if let Some(j) = resolver.callable(r, segs) {
                 if j != i {
-                    let kind = if raws[j].node.kind == Kind::Const { "uses_const" } else { "calls" };
+                    let kind = if raws[j].node.kind == Kind::Const {
+                        "uses_const"
+                    } else {
+                        "calls"
+                    };
                     edges.insert((i, j, kind, true));
                 }
             }
@@ -615,7 +814,10 @@ pub fn analyse(files: &[SourceFile]) -> Result<RepoGraph, String> {
             if COMMON_METHODS.contains(&m.as_str()) {
                 continue;
             }
-            let Some(candidates) = resolver.methods.get(&(r.node.crate_name.clone(), m.clone())) else {
+            let Some(candidates) = resolver
+                .methods
+                .get(&(r.node.crate_name.clone(), m.clone()))
+            else {
                 continue;
             };
             if candidates.len() <= POSSIBLE_LIMIT {
@@ -645,7 +847,12 @@ pub fn analyse(files: &[SourceFile]) -> Result<RepoGraph, String> {
         g
     };
     let mut level = vec![None::<usize>; raws.len()];
-    fn depth(i: usize, g: &[Vec<usize>], memo: &mut Vec<Option<usize>>, visiting: &mut Vec<bool>) -> usize {
+    fn depth(
+        i: usize,
+        g: &[Vec<usize>],
+        memo: &mut Vec<Option<usize>>,
+        visiting: &mut Vec<bool>,
+    ) -> usize {
         if let Some(l) = memo[i] {
             return l;
         }
@@ -675,7 +882,11 @@ pub fn analyse(files: &[SourceFile]) -> Result<RepoGraph, String> {
         let base = n.id.replace("::", "/").to_lowercase();
         let count = taken.entry(base.clone()).or_insert(0);
         *count += 1;
-        n.slug = if *count == 1 { base } else { format!("{base}-{count}") };
+        n.slug = if *count == 1 {
+            base
+        } else {
+            format!("{base}-{count}")
+        };
         nodes.push(n);
     }
     let mut out_edges: Vec<Edge> = edges
@@ -691,7 +902,11 @@ pub fn analyse(files: &[SourceFile]) -> Result<RepoGraph, String> {
     let mut crates: Vec<String> = files.iter().map(|f| f.crate_name.clone()).collect();
     crates.sort();
     crates.dedup();
-    Ok(RepoGraph { crates, nodes, edges: out_edges })
+    Ok(RepoGraph {
+        crates,
+        nodes,
+        edges: out_edges,
+    })
 }
 
 fn module_of(src: &Path, file: &Path) -> Vec<String> {
@@ -700,7 +915,9 @@ fn module_of(src: &Path, file: &Path) -> Vec<String> {
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
         .collect();
-    if parts.last().map(String::as_str) == Some("lib") || parts.last().map(String::as_str) == Some("mod") {
+    if parts.last().map(String::as_str) == Some("lib")
+        || parts.last().map(String::as_str) == Some("mod")
+    {
         parts.pop();
     }
     parts
@@ -721,11 +938,15 @@ fn crate_name(dir: &Path) -> String {
             }
         }
     }
-    dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.path());
     for e in entries {
@@ -741,10 +962,14 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Read the `src` directory of each crate and build the graph. File paths in the result are
 /// relative to `root`, so they can be turned into links into the repository.
 pub fn build(crate_dirs: &[PathBuf], root: &Path) -> Result<RepoGraph, String> {
-    let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", root.display()))?;
     let mut files = Vec::new();
     for dir in crate_dirs {
-        let dir = &dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+        let dir = &dir
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
         let name = crate_name(dir);
         let src = dir.join("src");
         let mut paths = Vec::new();
@@ -780,11 +1005,18 @@ mod tests {
     }
 
     fn has_edge(g: &RepoGraph, from: &str, to: &str, kind: &str) -> bool {
-        g.edges.iter().any(|e| e.from == from && e.to == to && e.kind == kind)
+        g.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.kind == kind)
     }
 
     fn node<'a>(g: &'a RepoGraph, id: &str) -> &'a Node {
-        g.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("no node {id}: {:?}", g.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()))
+        g.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| {
+            panic!(
+                "no node {id}: {:?}",
+                g.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+            )
+        })
     }
 
     #[test]
@@ -828,7 +1060,12 @@ mod tests {
             file(&["a"], "pub fn root() {}\nmod inner { pub fn deep() { super::root() } }\n"),
             file(&["b"], "struct W;\nimpl W { fn make() -> W { W } fn go(&self) { Self::make(); W::make(); } }\n"),
         ]);
-        assert!(has_edge(&g, "demo::a::inner::deep", "demo::a::root", "calls"));
+        assert!(has_edge(
+            &g,
+            "demo::a::inner::deep",
+            "demo::a::root",
+            "calls"
+        ));
         assert!(has_edge(&g, "demo::b::W::go", "demo::b::W::make", "calls"));
     }
 
@@ -847,8 +1084,13 @@ mod tests {
 
     #[test]
     fn a_method_name_shared_by_many_types_is_not_guessed_at() {
-        let types: String = (0..5).map(|i| format!("struct T{i}; impl T{i} {{ fn same(&self) {{}} }}\n")).collect();
-        let g = graph(&[file(&["m"], &format!("{types}fn run(x: T0) {{ x.same(); }}\n"))]);
+        let types: String = (0..5)
+            .map(|i| format!("struct T{i}; impl T{i} {{ fn same(&self) {{}} }}\n"))
+            .collect();
+        let g = graph(&[file(
+            &["m"],
+            &format!("{types}fn run(x: T0) {{ x.same(); }}\n"),
+        )]);
         assert!(g.edges.iter().all(|e| e.kind != "calls"));
     }
 
@@ -860,7 +1102,12 @@ mod tests {
         )]);
         let t = node(&g, "demo::f::tests::adds");
         assert_eq!(t.kind, Kind::Test);
-        assert!(has_edge(&g, "demo::f::tests::adds", "demo::f::add", "calls"));
+        assert!(has_edge(
+            &g,
+            "demo::f::tests::adds",
+            "demo::f::add",
+            "calls"
+        ));
     }
 
     #[test]
@@ -879,14 +1126,27 @@ mod tests {
             &["c"],
             "struct C { v: Vec<u32> }\nimpl C { fn push(&mut self, x: u32) { self.v.push(x); }\n fn add_two(&mut self) { self.push(1); } }\nfn other(v: &mut Vec<u32>) { v.push(1); }\n",
         )]);
-        assert!(has_edge(&g, "demo::c::C::add_two", "demo::c::C::push", "calls"));
+        assert!(has_edge(
+            &g,
+            "demo::c::C::add_two",
+            "demo::c::C::push",
+            "calls"
+        ));
         assert!(!has_edge(&g, "demo::c::other", "demo::c::C::push", "calls"));
-        assert!(!has_edge(&g, "demo::c::C::push", "demo::c::C::push", "calls"));
+        assert!(!has_edge(
+            &g,
+            "demo::c::C::push",
+            "demo::c::C::push",
+            "calls"
+        ));
     }
 
     #[test]
     fn a_constant_is_a_use_edge_not_a_call() {
-        let g = graph(&[file(&["k"], "const LIMIT: u32 = 3;\nfn f(x: u32) -> bool { x > LIMIT }\n")]);
+        let g = graph(&[file(
+            &["k"],
+            "const LIMIT: u32 = 3;\nfn f(x: u32) -> bool { x > LIMIT }\n",
+        )]);
         assert!(has_edge(&g, "demo::k::f", "demo::k::LIMIT", "uses_const"));
         assert!(g.edges.iter().all(|e| e.kind != "calls"));
     }
@@ -905,7 +1165,10 @@ mod tests {
 
     #[test]
     fn recursion_does_not_loop_and_slugs_are_unique_ignoring_case() {
-        let g = graph(&[file(&["r"], "fn f() { f(); }\nstruct Graph;\nfn graph() {}\n")]);
+        let g = graph(&[file(
+            &["r"],
+            "fn f() { f(); }\nstruct Graph;\nfn graph() {}\n",
+        )]);
         assert_eq!(node(&g, "demo::r::f").level, 0);
         let slugs: BTreeSet<String> = g.nodes.iter().map(|n| n.slug.to_lowercase()).collect();
         assert_eq!(slugs.len(), g.nodes.len());
@@ -914,7 +1177,10 @@ mod tests {
     #[test]
     fn modules_come_from_file_paths() {
         let src = Path::new("/c/src");
-        assert_eq!(module_of(src, Path::new("/c/src/lib.rs")), Vec::<String>::new());
+        assert_eq!(
+            module_of(src, Path::new("/c/src/lib.rs")),
+            Vec::<String>::new()
+        );
         assert_eq!(module_of(src, Path::new("/c/src/fill.rs")), ["fill"]);
         assert_eq!(module_of(src, Path::new("/c/src/bin/sg.rs")), ["bin", "sg"]);
         assert_eq!(module_of(src, Path::new("/c/src/a/mod.rs")), ["a"]);

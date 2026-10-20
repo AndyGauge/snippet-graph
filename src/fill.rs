@@ -44,7 +44,9 @@ pub fn build_prompt(graph: &Graph, id: &NodeId, prior_errors: &[String]) -> Stri
             .filter_map(|d| graph.nodes.get(d))
             .collect();
         if !deps.is_empty() {
-            out.push_str("\nAvailable items it may use (signatures and doc comments only):\n```rust\n");
+            out.push_str(
+                "\nAvailable items it may use (signatures and doc comments only):\n```rust\n",
+            );
             for dep in deps {
                 if let Some(header) = &dep.impl_header {
                     out.push_str(&format!("// in {header}\n"));
@@ -59,9 +61,11 @@ pub fn build_prompt(graph: &Graph, id: &NodeId, prior_errors: &[String]) -> Stri
         "\nIf this function needs several distinct steps (filtering, grouping, summing and so on), implement it anyway but make the first line of the body `{}: <the steps that should be separate functions>`.\n",
         crate::structure::MARKER_PREFIX
     ));
-    let reason = graph.refactor.get(id).cloned().or_else(|| {
-        crate::structure::test_load(graph, id).map(|f| f.detail)
-    });
+    let reason = graph
+        .refactor
+        .get(id)
+        .cloned()
+        .or_else(|| crate::structure::test_load(graph, id).map(|f| f.detail));
     if let Some(reason) = reason {
         out.push_str(&format!(
             "\nThis function was judged too large ({reason}). Do not write one long body. Put each distinct step in its own small nested `fn` inside the body, and keep the outer body a short sequence of calls to them.\n"

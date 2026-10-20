@@ -215,7 +215,10 @@ impl Plugin {
                     if reply.text.is_none() && reply.error.is_none() {
                         continue;
                     }
-                    let tx = reader_pending.lock().ok().and_then(|mut p| p.remove(&reply.id));
+                    let tx = reader_pending
+                        .lock()
+                        .ok()
+                        .and_then(|mut p| p.remove(&reply.id));
                     if let Some(tx) = tx {
                         let _ = tx.send(Ok(reply));
                     }
@@ -229,7 +232,10 @@ impl Plugin {
         });
         let info = hello_rx.recv_timeout(HELLO_TIMEOUT).map_err(|_| {
             let _ = child.kill();
-            format!("provider {} did not answer the handshake", program.display())
+            format!(
+                "provider {} did not answer the handshake",
+                program.display()
+            )
         })?;
         if info.hello != PROTOCOL {
             let _ = child.kill();
@@ -269,7 +275,10 @@ impl Plugin {
             .insert(request.id, tx);
         let line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
         {
-            let mut w = self.writer.lock().map_err(|_| "provider writer poisoned".to_string())?;
+            let mut w = self
+                .writer
+                .lock()
+                .map_err(|_| "provider writer poisoned".to_string())?;
             if let Err(e) = writeln!(w, "{line}").and_then(|_| w.flush()) {
                 if let Ok(mut p) = self.pending.lock() {
                     p.remove(&request.id);
@@ -307,7 +316,8 @@ pub struct PluginGenerator {
     slot: Option<usize>,
 }
 
-pub const SYSTEM: &str = "You are a precise Rust engineer. Output only what is asked, no commentary.";
+pub const SYSTEM: &str =
+    "You are a precise Rust engineer. Output only what is asked, no commentary.";
 pub const MAX_TOKENS: u32 = 16000;
 
 impl Generator for PluginGenerator {
@@ -323,7 +333,9 @@ impl Generator for PluginGenerator {
         })?;
         let usage = &self.plugin.usage;
         usage.input.fetch_add(reply.input_tokens, Ordering::Relaxed);
-        usage.output.fetch_add(reply.output_tokens, Ordering::Relaxed);
+        usage
+            .output
+            .fetch_add(reply.output_tokens, Ordering::Relaxed);
         let n = usage.calls.fetch_add(1, Ordering::Relaxed) + 1;
         eprintln!(
             "  model call {n}: {}s, {}+{} tokens",
@@ -331,7 +343,9 @@ impl Generator for PluginGenerator {
             reply.input_tokens,
             reply.output_tokens
         );
-        reply.text.ok_or_else(|| "the provider sent no text".to_string())
+        reply
+            .text
+            .ok_or_else(|| "the provider sent no text".to_string())
     }
 }
 
@@ -340,10 +354,17 @@ impl Generator for PluginGenerator {
 pub fn find_provider(name: &str) -> Result<PathBuf, String> {
     if name.contains('/') {
         let p = PathBuf::from(name);
-        return if p.exists() { Ok(p) } else { Err(format!("no provider program at {name}")) };
+        return if p.exists() {
+            Ok(p)
+        } else {
+            Err(format!("no provider program at {name}"))
+        };
     }
     let file = format!("{PROVIDER_PREFIX}{name}");
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         let beside = dir.join(&file);
         if beside.exists() {
             return Ok(beside);
@@ -402,7 +423,8 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         // The harness prints its own lines to stdout; the protocol ignores lines that are not
         // JSON for it, so they do not matter. The test binary runs as the provider.
-        let script = std::env::temp_dir().join(format!("sg-test-provider-{mode}-{}.sh", std::process::id()));
+        let script =
+            std::env::temp_dir().join(format!("sg-test-provider-{mode}-{}.sh", std::process::id()));
         std::fs::write(
             &script,
             format!(
@@ -507,7 +529,10 @@ mod tests {
     #[test]
     fn a_named_provider_is_looked_up_by_its_prefix_and_a_path_is_taken_as_given() {
         let err = find_provider("definitely-not-installed").unwrap_err();
-        assert!(err.contains("sg-provider-definitely-not-installed"), "{err}");
+        assert!(
+            err.contains("sg-provider-definitely-not-installed"),
+            "{err}"
+        );
         assert!(find_provider("/no/such/provider").is_err());
         let exe = std::env::current_exe().unwrap();
         assert_eq!(find_provider(exe.to_str().unwrap()).unwrap(), exe);

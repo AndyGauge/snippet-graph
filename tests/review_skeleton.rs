@@ -36,7 +36,10 @@ struct Fake(Vec<String>, usize);
 impl Generator for Fake {
     fn generate(&mut self, prompt: &str) -> Result<String, String> {
         self.1 += 1;
-        assert!(prompt.contains("`summarise`"), "prompt must name the flagged function");
+        assert!(
+            prompt.contains("`summarise`"),
+            "prompt must name the flagged function"
+        );
         Ok(self.0.remove(0))
     }
 }
@@ -47,7 +50,12 @@ fn build(dir: &Path, text: &str) -> Result<Graph, Vec<String>> {
     if report.ok {
         Ok(graph)
     } else {
-        Err(report.by_node.into_values().flatten().chain(report.unattributed).collect())
+        Err(report
+            .by_node
+            .into_values()
+            .flatten()
+            .chain(report.unattributed)
+            .collect())
     }
 }
 
@@ -73,10 +81,16 @@ fn review_splits_a_bundled_function_with_the_real_parser_and_compiler() {
         2,
     );
 
-    assert_eq!(gen.1, 1, "one rewrite, and the split skeleton is no longer flagged");
+    assert_eq!(
+        gen.1, 1,
+        "one rewrite, and the split skeleton is no longer flagged"
+    );
     assert_eq!(reviewed.graph.nodes.len(), 4);
     assert!(reviewed.graph.nodes.contains_key(&NodeId("counted".into())));
-    assert!(reviewed.graph.nodes.contains_key(&NodeId("count_unpaid".into())));
+    assert!(reviewed
+        .graph
+        .nodes
+        .contains_key(&NodeId("count_unpaid".into())));
     assert!(reviewed.graph.nodes[&NodeId("summarise".into())]
         .signature
         .contains("Calls the helpers"));

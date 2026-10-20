@@ -16,7 +16,10 @@ pub enum Status {
     /// A later view no longer shows it. `by` are the versions of the affected
     /// nodes that differ from the last view in which it appeared (empty when
     /// nothing changed, which points at a flaky test).
-    Resolved { by: Vec<VersionId>, in_view: ViewId },
+    Resolved {
+        by: Vec<VersionId>,
+        in_view: ViewId,
+    },
 }
 
 /// One distinct failure, tracked across views. Resolved failures stay in the
@@ -148,7 +151,12 @@ fn read(
     Ok(reading)
 }
 
-fn subjects(kinds: &mut Kinds<'_>, view: &View, outcome: &NodeId, build: bool) -> Result<Vec<NodeId>, StoreError> {
+fn subjects(
+    kinds: &mut Kinds<'_>,
+    view: &View,
+    outcome: &NodeId,
+    build: bool,
+) -> Result<Vec<NodeId>, StoreError> {
     if build {
         return Ok(vec![outcome.clone()]);
     }
@@ -216,7 +224,10 @@ pub fn ledger(store: &dyn Store) -> Result<Vec<Failure>, StoreError> {
         }
 
         let failing_tests: BTreeSet<&NodeId> = reading.failing.iter().map(|(t, _, _)| t).collect();
-        for f in failures.iter_mut().filter(|f| f.is_open() && !present.contains(&f.id)) {
+        for f in failures
+            .iter_mut()
+            .filter(|f| f.is_open() && !present.contains(&f.id))
+        {
             let gone = match f.kind {
                 Kind::Test => reading.tested.contains(&f.test) || failing_tests.contains(&f.test),
                 Kind::Build => reading.has_outcomes && !reading.any_build_error,
@@ -321,7 +332,9 @@ pub fn sweep_plan(store: &dyn Store, view: &View) -> Result<Vec<(NodeId, Version
             continue;
         }
         let unfilled = current.body.is_none();
-        let failing = failures.iter().any(|f| f.is_open() && f.touches(node, version));
+        let failing = failures
+            .iter()
+            .any(|f| f.is_open() && f.touches(node, version));
         if !unfilled && !failing {
             continue;
         }
@@ -415,10 +428,7 @@ mod tests {
             versions.insert(NodeId("f".into()), fid.clone());
             versions.insert(NodeId("t_f".into()), tid);
             let mut uses = BTreeMap::new();
-            uses.insert(
-                NodeId("t_f".into()),
-                BTreeSet::from([NodeId("f".into())]),
-            );
+            uses.insert(NodeId("t_f".into()), BTreeSet::from([NodeId("f".into())]));
             let view = View::new(
                 RunId("r".into()),
                 self.parent.as_ref().map(|p| p.id.clone()),
@@ -460,8 +470,20 @@ mod tests {
     #[test]
     fn a_failure_is_opened_linked_to_versions_and_later_resolved() {
         let mut fx = Fixture::new();
-        let (_, bad) = fx.view(Some("{ 1 }"), vec![fail("t_f", "thread 'x' (123) panicked at src/lib.rs:4:9:\nboom")]);
-        let (_, bad_again) = fx.view(Some("{ 1 }"), vec![fail("t_f", "thread 'x' (987) panicked at src/lib.rs:4:9:\nboom")]);
+        let (_, bad) = fx.view(
+            Some("{ 1 }"),
+            vec![fail(
+                "t_f",
+                "thread 'x' (123) panicked at src/lib.rs:4:9:\nboom",
+            )],
+        );
+        let (_, bad_again) = fx.view(
+            Some("{ 1 }"),
+            vec![fail(
+                "t_f",
+                "thread 'x' (987) panicked at src/lib.rs:4:9:\nboom",
+            )],
+        );
         assert_eq!(bad, bad_again);
         let open = ledger(&fx.store).unwrap();
         assert_eq!(open.len(), 1, "thread ids must not make a new failure");
@@ -564,7 +586,10 @@ mod tests {
     #[test]
     fn a_version_that_never_compiled_is_not_good() {
         let mut fx = Fixture::new();
-        fx.view(Some("{ oops }"), vec![fail("f", "error[E0425]: cannot find value")]);
+        fx.view(
+            Some("{ oops }"),
+            vec![fail("f", "error[E0425]: cannot find value")],
+        );
         assert_eq!(last_good(&fx.store, &NodeId("f".into())).unwrap(), None);
         let all = ledger(&fx.store).unwrap();
         assert_eq!(all[0].kind, Kind::Build);
