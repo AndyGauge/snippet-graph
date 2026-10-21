@@ -11,6 +11,7 @@ const PARSE_ATTEMPTS: usize = 3;
 const LIB: &str = "src/lib.rs";
 const MANIFEST_MARK: &str = "Cargo.toml";
 const LIB_MARK: &str = "src/lib.rs";
+const REMOVE_MARK: &str = "remove";
 
 pub struct Schema {
     pub dependencies: toml::Table,
@@ -22,6 +23,7 @@ pub struct Schema {
 pub struct Sections {
     pub dependencies: Option<String>,
     pub code: String,
+    pub remove: Vec<String>,
 }
 
 fn marker(line: &str) -> Option<&str> {
@@ -35,6 +37,7 @@ pub fn split_sections(reply: &str) -> Sections {
     let mut current: Option<&str> = None;
     let mut deps = String::new();
     let mut code = String::new();
+    let mut remove = Vec::new();
     let mut marked = false;
     for line in reply.lines() {
         if line.trim_start().starts_with("```") {
@@ -49,10 +52,20 @@ pub fn split_sections(reply: &str) -> Sections {
                 current = Some(LIB_MARK);
                 marked = true;
             }
+            Some(REMOVE_MARK) => {
+                current = Some(REMOVE_MARK);
+                marked = true;
+            }
             _ => match current {
                 Some(MANIFEST_MARK) => {
                     deps.push_str(line);
                     deps.push('\n');
+                }
+                Some(REMOVE_MARK) => {
+                    let name = line.trim().trim_matches('`');
+                    if !name.is_empty() {
+                        remove.push(name.to_string());
+                    }
                 }
                 Some(_) => {
                     code.push_str(line);
@@ -69,6 +82,7 @@ pub fn split_sections(reply: &str) -> Sections {
     Sections {
         dependencies: (!deps.trim().is_empty()).then(|| deps.trim().to_string()),
         code: code.trim().to_string(),
+        remove,
     }
 }
 
@@ -233,7 +247,7 @@ pub fn build(
     rounds: usize,
 ) -> Result<Schema, String> {
     let mut dependencies = toml::Table::new();
-    let mut notes = Vec::new();
+    let notes = Vec::new();
 
     let mut errors: Vec<String> = Vec::new();
     let mut previous = String::new();
@@ -261,13 +275,39 @@ pub fn build(
         }
         previous = sections.code;
     }
-    let mut graph = graph.ok_or_else(|| {
+    let graph = graph.ok_or_else(|| {
         format!(
             "no parseable schema after {PARSE_ATTEMPTS} drafts: {}",
             errors.join(" ")
         )
     })?;
 
+    converge(
+        crate_dir,
+        spec,
+        guide,
+        generator,
+        check,
+        rounds,
+        graph,
+        dependencies,
+        notes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Check the graph and repair the failing items until it compiles or the rounds run out.
+fn converge(
+    crate_dir: &Path,
+    spec: &str,
+    guide: &str,
+    generator: &mut dyn Generator,
+    check: &mut dyn FnMut(&Graph) -> std::io::Result<Report>,
+    rounds: usize,
+    mut graph: Graph,
+    mut dependencies: toml::Table,
+    mut notes: Vec<String>,
+) -> Result<Schema, String> {
     for round in 0..=rounds {
         let report = check(&graph).map_err(|e| e.to_string())?;
         if report.ok {
@@ -346,6 +386,152 @@ pub fn build(
         }
     }
     unreachable!("the last round returns")
+}
+
+/// What a change did to a schema, by item name.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Diff {
+    pub added: Vec<NodeId>,
+    pub changed: Vec<NodeId>,
+    pub removed: Vec<NodeId>,
+}
+
+impl Diff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
+    }
+
+    /// The items that need new tests and bodies: everything added or changed.
+    pub fn to_fill(&self) -> Vec<NodeId> {
+        self.added.iter().chain(&self.changed).cloned().collect()
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (mark, ids) in [("+", &self.added), ("~", &self.changed), ("-", &self.removed)] {
+            for id in ids {
+                out.push_str(&format!("{mark} {}\n", id.0));
+            }
+        }
+        out
+    }
+}
+
+pub fn diff(before: &Graph, after: &Graph) -> Diff {
+    let mut out = Diff::default();
+    for (id, node) in &after.nodes {
+        match before.nodes.get(id) {
+            None => out.added.push(id.clone()),
+            Some(old) if old.render() != node.render() => out.changed.push(id.clone()),
+            Some(_) => {}
+        }
+    }
+    for id in before.nodes.keys() {
+        if !after.nodes.contains_key(id) {
+            out.removed.push(id.clone());
+        }
+    }
+    out
+}
+
+pub struct Upgrade {
+    pub schema: Schema,
+    pub diff: Diff,
+}
+
+/// Read a schema in the form `render` writes: a manifest section, then the code.
+pub fn parse_schema(text: &str) -> Result<(toml::Table, Graph), String> {
+    let sections = split_sections(text);
+    let dependencies = match sections.dependencies.as_deref() {
+        Some(section) => parse_dependencies(section)?,
+        None => toml::Table::new(),
+    };
+    let graph = skeleton::parse(Path::new(LIB), &sections.code).map_err(|e| e.to_string())?;
+    Ok((dependencies, graph))
+}
+
+pub fn upgrade_prompt(spec: &str, guide: &str, current: &str, change: &str, error: &str) -> String {
+    let guide = if guide.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Design rules:\n{guide}\n\n")
+    };
+    let mut p = format!(
+        "This Rust schema already exists and compiles. Change it as requested.\n\n{guide}Spec it was written for:\n{spec}\n\n\
+         The schema now:\n```rust\n{current}\n```\n\nThe change:\n{change}\n\n\
+         Reply with only the items that are new or must change, each restated whole under `// === src/lib.rs ===`, \
+         keeping each item's name. Items you do not restate stay exactly as they are. To delete items, list their \
+         names one per line under `// === remove ===`. If the dependencies change, add a `// === Cargo.toml ===` \
+         section with the complete `[dependencies]` table. Output only Rust source, no prose. Every function body \
+         is exactly `{{ todo!() }}`. One file, no `mod` blocks, no macros, no associated types or consts in impl blocks.\n"
+    );
+    if !error.is_empty() {
+        p.push_str(&format!("\nYour previous reply failed with:\n{error}\nReply again.\n"));
+    }
+    p
+}
+
+/// Apply a change request to an existing schema. The model restates only the items that move,
+/// they are merged by name, and the same per-item repair as `build` brings the result back to
+/// compiling. The diff says which items need fresh tests and bodies.
+#[allow(clippy::too_many_arguments)]
+pub fn upgrade(
+    crate_dir: &Path,
+    spec: &str,
+    guide: &str,
+    current: &str,
+    change: &str,
+    generator: &mut dyn Generator,
+    check: &mut dyn FnMut(&Graph) -> std::io::Result<Report>,
+    rounds: usize,
+) -> Result<Upgrade, String> {
+    let (mut dependencies, before) = parse_schema(current)?;
+    apply_dependencies(crate_dir, &dependencies)?;
+    let mut graph = before.clone();
+    let mut notes = Vec::new();
+
+    let mut error = String::new();
+    let mut applied = false;
+    for attempt in 1..=PARSE_ATTEMPTS {
+        eprintln!("schema upgrade draft {attempt}");
+        let reply = generator.generate(&upgrade_prompt(spec, guide, &source(&before), change, &error))?;
+        let sections = split_sections(&reply);
+        let incoming = if sections.code.is_empty() {
+            Ok(Graph::default())
+        } else {
+            skeleton::parse(Path::new(LIB), &sections.code).map_err(|e| e.to_string())
+        };
+        let incoming = match incoming {
+            Ok(g) => g,
+            Err(e) => {
+                error = e;
+                continue;
+            }
+        };
+        if incoming.nodes.is_empty() && sections.remove.is_empty() && sections.dependencies.is_none() {
+            error = "the reply changed nothing".to_string();
+            continue;
+        }
+        merge_dependencies(crate_dir, &mut dependencies, sections.dependencies.as_deref())?;
+        for name in &sections.remove {
+            if graph.nodes.remove(&NodeId(name.clone())).is_none() {
+                notes.push(format!("asked to remove `{name}`, which the schema does not have"));
+            }
+        }
+        splice(&mut graph, incoming);
+        applied = true;
+        break;
+    }
+    if !applied {
+        return Err(format!("no usable upgrade after {PARSE_ATTEMPTS} replies: {error}"));
+    }
+
+    let spec = format!("{spec}\n\nChange being made to the schema:\n{change}");
+    let schema = converge(
+        crate_dir, &spec, guide, generator, check, rounds, graph, dependencies, notes,
+    )?;
+    let diff = diff(&before, &schema.graph);
+    Ok(Upgrade { schema, diff })
 }
 
 #[cfg(test)]
@@ -516,5 +702,74 @@ mod tests {
         build(&dir, "spec", "", &mut gen, &mut check, 2).unwrap();
         assert!(gen.1[1].contains("no matching package named `nope`"));
         assert!(gen.1[1].contains("complete corrected schema"));
+    }
+
+    const BASE: &str = "// === Cargo.toml ===\n[dependencies]\nserde = \"1\"\n\n// === src/lib.rs ===\npub struct A;\n\npub struct B;\n\npub fn keep() -> A { todo!() }\n";
+
+    #[test]
+    fn an_upgrade_restates_only_what_moves_and_reports_the_diff() {
+        let dir = crate_dir();
+        let mut gen = Script(
+            vec!["pub struct B(u32);\npub fn extra() -> B { todo!() }\n".into()],
+            Vec::new(),
+        );
+        let up = upgrade(&dir, "spec", "", BASE, "give B a number", &mut gen, &mut rejecting("BAD"), 2).unwrap();
+        let text = render(&up.schema);
+        assert!(text.contains("pub struct B(u32);"), "{text}");
+        assert!(text.contains("pub struct A;"));
+        assert!(text.contains("pub fn keep() -> A"));
+        assert!(text.contains("serde = \"1\""));
+        assert_eq!(up.diff.added, vec![NodeId("extra".into())]);
+        assert_eq!(up.diff.changed, vec![NodeId("B".into())]);
+        assert!(up.diff.removed.is_empty());
+        assert_eq!(up.diff.to_fill().len(), 2);
+        assert!(gen.1[0].contains("give B a number"));
+        assert!(gen.1[0].contains("pub fn keep() -> A"));
+    }
+
+    #[test]
+    fn an_upgrade_can_remove_items() {
+        let dir = crate_dir();
+        let mut gen = Script(vec!["// === remove ===\nkeep\nmissing\n".into()], Vec::new());
+        let up = upgrade(&dir, "spec", "", BASE, "drop keep", &mut gen, &mut rejecting("BAD"), 2).unwrap();
+        assert!(!render(&up.schema).contains("keep"));
+        assert_eq!(up.diff.removed, vec![NodeId("keep".into())]);
+        assert!(up.schema.notes.iter().any(|n| n.contains("`missing`")));
+    }
+
+    #[test]
+    fn an_upgrade_that_breaks_an_item_is_repaired_like_a_build() {
+        let dir = crate_dir();
+        let mut gen = Script(
+            vec!["pub struct B(BAD);\n".into(), "pub struct B(u8);\n".into()],
+            Vec::new(),
+        );
+        let up = upgrade(&dir, "spec", "", BASE, "change", &mut gen, &mut rejecting("BAD"), 2).unwrap();
+        assert!(render(&up.schema).contains("pub struct B(u8);"));
+        assert!(gen.1[1].contains("## `B`"));
+        assert_eq!(up.diff.changed, vec![NodeId("B".into())]);
+    }
+
+    #[test]
+    fn a_reply_that_changes_nothing_is_asked_again_then_fails() {
+        let dir = crate_dir();
+        let mut gen = Script(vec!["".into(), "".into(), "".into()], Vec::new());
+        let err = upgrade(&dir, "spec", "", BASE, "x", &mut gen, &mut rejecting("BAD"), 1)
+            .err()
+            .unwrap();
+        assert!(err.contains("changed nothing"), "{err}");
+        assert!(gen.1[1].contains("failed with"));
+    }
+
+    #[test]
+    fn dependencies_in_an_upgrade_reply_are_added_to_the_old_ones() {
+        let dir = crate_dir();
+        let mut gen = Script(
+            vec!["// === Cargo.toml ===\n[dependencies]\nrand = \"0.8\"\n// === src/lib.rs ===\npub struct C;\n".into()],
+            Vec::new(),
+        );
+        let up = upgrade(&dir, "spec", "", BASE, "add C", &mut gen, &mut rejecting("BAD"), 1).unwrap();
+        assert!(render(&up.schema).contains("rand = \"0.8\""));
+        assert!(std::fs::read_to_string(dir.join("Cargo.toml")).unwrap().contains("rand"));
     }
 }

@@ -1,47 +1,36 @@
 use snippet_graph::assemble::assemble;
 use snippet_graph::bench::{self, BenchConfig};
 use snippet_graph::benchgen;
-use snippet_graph::blame;
 use snippet_graph::cli;
 use snippet_graph::fill::{fill_all_versioned, Generator};
-use snippet_graph::handoff;
 use snippet_graph::import::write_back;
-use snippet_graph::ledger;
-use snippet_graph::lintfix;
-use snippet_graph::metrics::RunMetrics;
-use snippet_graph::parallel::fill_parallel_versioned;
 use snippet_graph::plugin::{self, Plugin, PluginGenerator};
 use snippet_graph::repo_graph;
 use snippet_graph::review;
 use snippet_graph::schema;
+use snippet_graph::session::{
+    self, all_tests, check_graph, new_run_id, now_ms, record_view, save_state, FILL_RETRIES, MODEL,
+    TESTGEN_RETRIES,
+};
 use snippet_graph::skeleton;
 use snippet_graph::store::DirStore;
-use snippet_graph::structure;
 use snippet_graph::testgen;
 use snippet_graph::variants::{self, Evaluation};
 use snippet_graph::verify;
-use snippet_graph::version::{Origin, Results, RunId, Store, View};
+use snippet_graph::version::{Results, Store};
 use snippet_graph::view;
-use snippet_graph::{Graph, NodeId, NodeKind, TestReport};
+use snippet_graph::{Graph, NodeId, NodeKind};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const SKELETON_ATTEMPTS: usize = 4;
-const FILL_RETRIES: usize = 3;
-const TESTGEN_RETRIES: usize = 3;
-const REPAIR_ROUNDS: usize = 4;
-const LINT_PRUNE_ROUNDS: usize = 3;
-const MAX_REPAIRS_PER_ROUND: usize = 4;
-const NODE_ATTEMPT_BUDGET: usize = 10;
 const BENCH_RETRIES: usize = 3;
-const MODEL: &str = "sg";
 const USAGE: &str = "usage:
   sg [run] <spec.md> <crate_dir> [--oracle file.rs] [--width N] [--resume sg-state.json] [--prelude file.rs] [--store DIR] [--handoff DIR] [--no-review] [--provider NAME] [--provider-args ARGS]
-  sg schema <spec.md> <crate_dir> [--guide FILE] [--out FILE] [--rounds N] [--provider NAME] [--provider-args ARGS]
+  sg schema <spec.md> <crate_dir> [--from SCHEMA --change FILE] [--guide FILE] [--out FILE] [--rounds N] [--provider NAME] [--provider-args ARGS]
   sg history <store> [--node ID]
   sg diff <store> <a> <b>
   sg graph [--out FILE] [--root DIR] <crate_dir>...
@@ -74,10 +63,6 @@ fn skeleton_prompt(spec: &str, prelude: &str, errors: &[String], previous: &str)
         ));
     }
     p
-}
-
-fn check_graph(crate_dir: &Path, graph: &Graph) -> std::io::Result<verify::Report> {
-    verify::check(crate_dir, &assemble(graph))
 }
 
 const PRELUDE_GAP: usize = 10_000;
@@ -263,42 +248,12 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     })
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
 fn io(e: impl ToString) -> String {
     e.to_string()
 }
 
-fn origin(run: &RunId) -> Origin {
-    Origin {
-        run: run.clone(),
-        model: MODEL.into(),
-        prompt_hash: String::new(),
-        created_ms: now_ms(),
-    }
-}
-
-fn record_view(
-    store: &mut dyn Store,
-    graph: &Graph,
-    run: &RunId,
-    parent: Option<&View>,
-) -> Result<View, String> {
-    let v = view::from_graph(store, graph, run, &origin(run), parent).map_err(io)?;
-    store.put_view(v.clone()).map_err(io)?;
-    Ok(v)
-}
-
 fn open_store(dir: &str) -> Result<DirStore, String> {
     DirStore::open(Path::new(dir)).map_err(io)
-}
-
-fn new_run_id() -> RunId {
-    RunId(format!("run-{}", now_ms()))
 }
 
 fn generator_pool(plugin: &Arc<Plugin>, width: usize) -> Vec<Box<dyn Generator + Send>> {
@@ -331,11 +286,6 @@ fn open_plugin(name: Option<&str>, args: Option<&str>) -> Result<Arc<Plugin>, St
     Ok(p)
 }
 
-fn save_state(crate_dir: &Path, graph: &Graph) -> Result<(), String> {
-    let text = serde_json::to_string(graph).map_err(|e| e.to_string())?;
-    std::fs::write(crate_dir.join("sg-state.json"), text).map_err(|e| e.to_string())
-}
-
 fn load_state(path: &Path) -> Result<Graph, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut graph: Graph = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -347,37 +297,6 @@ fn load_state(path: &Path) -> Result<Graph, String> {
     Ok(graph)
 }
 
-fn all_tests(crate_dir: &Path, graph: &Graph) -> TestReport {
-    verify::run_tests(crate_dir, &assemble(graph), &[]).unwrap_or_default()
-}
-
-fn failing(report: &TestReport) -> usize {
-    report.outcomes.iter().filter(|o| !o.passed).count()
-}
-
-fn run_oracle(crate_dir: &Path, graph: &Graph, oracle: &Path) -> Result<bool, String> {
-    let work = std::env::temp_dir().join(format!("sg-oracle-{}", std::process::id()));
-    std::fs::create_dir_all(work.join("src")).map_err(|e| e.to_string())?;
-    std::fs::copy(crate_dir.join("Cargo.toml"), work.join("Cargo.toml"))
-        .map_err(|e| e.to_string())?;
-    let lib = assemble(graph)
-        .files
-        .into_values()
-        .next()
-        .unwrap_or_default();
-    let oracle_src = std::fs::read_to_string(oracle).map_err(|e| e.to_string())?;
-    std::fs::write(work.join("src/lib.rs"), format!("{lib}\n{oracle_src}"))
-        .map_err(|e| e.to_string())?;
-    let output = Command::new("cargo")
-        .args(["test", "--quiet"])
-        .current_dir(&work)
-        .output()
-        .map_err(|e| e.to_string())?;
-    eprint!("{}", String::from_utf8_lossy(&output.stdout));
-    eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    Ok(output.status.success())
-}
-
 fn run(args: Args) -> Result<bool, String> {
     let started = Instant::now();
     let spec = std::fs::read_to_string(&args.spec).map_err(|e| e.to_string())?;
@@ -386,14 +305,14 @@ fn run(args: Args) -> Result<bool, String> {
     let width = args.width.unwrap_or(plugin.info.channels.clamp(1, 16));
     let crate_dir = args.crate_dir;
     let store_dir = args.store.unwrap_or_else(|| crate_dir.join(".sg-store"));
-    let mut store = DirStore::open(&store_dir).map_err(io)?;
+    let store = DirStore::open(&store_dir).map_err(io)?;
     let run_id = new_run_id();
 
     let prelude_text = match &args.prelude {
         Some(path) => Some(std::fs::read_to_string(path).map_err(|e| e.to_string())?),
         None => None,
     };
-    let (mut graph, untested, review_notes) = match &args.resume {
+    let (graph, untested, review_notes) = match &args.resume {
         Some(path) => {
             let mut graph = load_state(path)?;
             graph.spec = spec.clone();
@@ -430,292 +349,38 @@ fn run(args: Args) -> Result<bool, String> {
         .filter(|n| n.kind == NodeKind::Test)
         .count();
     eprintln!("tests ok: {test_count} test nodes");
-
-    let first = record_view(&mut store, &graph, &run_id, None)?;
-    let mut generators = generator_pool(&plugin, width);
-    let lint = |g: &Graph| -> BTreeMap<NodeId, Vec<String>> {
-        let mut assembled = assemble(g);
-        for text in assembled.files.values_mut() {
-            text.insert_str(0, "#![allow(dead_code)] ");
-        }
-        verify::clippy(&crate_dir, &assembled)
-            .map(|r| r.by_node)
-            .unwrap_or_default()
-    };
-    graph.budget = NODE_ATTEMPT_BUDGET;
-    let (mut outcome, mut current) = fill_parallel_versioned(
-        &mut graph,
-        &mut generators,
-        &lint,
-        FILL_RETRIES,
-        &mut store,
-        &run_id,
-        MODEL,
-        Some(&first),
-    )
-    .map_err(io)?;
-    eprintln!(
-        "filled {}, failed {}",
-        outcome.filled.len(),
-        outcome.failed.len()
-    );
-
-    for round in 1..=REPAIR_ROUNDS {
-        let report = all_tests(&crate_dir, &graph);
-        if report.compiled && failing(&report) == 0 {
-            break;
-        }
-        let suspects = blame::rank(&graph, &report.outcomes, &[]);
-        eprintln!(
-            "repair round {round}: {} failing tests, {} suspects",
-            failing(&report),
-            suspects.len()
-        );
-        let targets = blame::repair_targets(&graph, &suspects, MAX_REPAIRS_PER_ROUND);
-        if targets.is_empty() {
-            break;
-        }
-        eprintln!(
-            "  retrying {}",
-            targets
-                .iter()
-                .map(|t| t.0.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let saved: Vec<(NodeId, String)> = graph
-            .nodes
-            .iter()
-            .filter(|(_, n)| matches!(n.kind, NodeKind::Function | NodeKind::Method))
-            .filter_map(|(id, n)| n.body.clone().map(|b| (id.clone(), b)))
-            .collect();
-        for target in &targets {
-            let mut findings = graph
-                .nodes
-                .get(target)
-                .and_then(|n| n.body.as_deref())
-                .map(|b| structure::evaluate_body(target, b))
-                .unwrap_or_default();
-            findings.extend(structure::test_load(&graph, target));
-            match structure::refactor_reason(&findings) {
-                Some(reason) => {
-                    eprintln!("  {} judged too large: {reason}", target.0);
-                    graph.refactor.insert(target.clone(), reason);
-                }
-                None => {
-                    graph.refactor.remove(target);
-                }
-            }
-            if let Some(node) = graph.nodes.get_mut(target) {
-                node.body = None;
-            }
-        }
-        let mut run_tests = |g: &Graph, only: &[NodeId]| {
-            verify::run_tests(&crate_dir, &assemble(g), only).unwrap_or_default()
-        };
-        let (mut again, view) = fill_all_versioned(
-            &mut graph,
-            &mut gen,
-            &mut run_tests,
-            FILL_RETRIES,
-            &mut store,
-            &run_id,
-            MODEL,
-            Some(&current),
-        )
-        .map_err(io)?;
-        current = view;
-        if !again.failed.is_empty() {
-            for (id, why) in &again.failed {
-                eprintln!("  revising tests for {}", id.0);
-                let mut check_tests = |g: &Graph| all_tests(&crate_dir, g);
-                let _ = testgen::revise_tests(
-                    &mut graph,
-                    &spec,
-                    id,
-                    std::slice::from_ref(why),
-                    &mut gen,
-                    &mut check_tests,
-                    TESTGEN_RETRIES,
-                );
-            }
-            let (second, view) = fill_all_versioned(
-                &mut graph,
-                &mut gen,
-                &mut run_tests,
-                FILL_RETRIES,
-                &mut store,
-                &run_id,
-                MODEL,
-                Some(&current),
-            )
-            .map_err(io)?;
-            current = view;
-            again.filled.extend(second.filled);
-            again.failed = second.failed;
-            for (id, n) in second.retries {
-                *again.retries.entry(id).or_default() += n;
-            }
-            for (id, n) in second.rollbacks {
-                *again.rollbacks.entry(id).or_default() += n;
-            }
-        }
-        for (id, body) in saved {
-            if let Some(node) = graph.nodes.get_mut(&id) {
-                if node.body.is_none() {
-                    node.body = Some(body);
-                }
-            }
-        }
-        outcome.filled.extend(again.filled);
-        outcome.failed.extend(again.failed);
-        for (id, n) in again.retries {
-            *outcome.retries.entry(id).or_default() += n;
-        }
-        for (id, n) in again.rollbacks {
-            *outcome.rollbacks.entry(id).or_default() += n;
-        }
-    }
-
-    for _ in 0..LINT_PRUNE_ROUNDS {
-        let lint = verify::clippy(&crate_dir, &assemble(&graph)).map_err(|e| e.to_string())?;
-        if lint.ok {
-            break;
-        }
-        let removed = lintfix::prune(&mut graph, &lint.by_node);
-        if removed.is_empty() {
-            break;
-        }
-        eprintln!("  pruned {} unused nodes", removed.len());
-        current = record_view(&mut store, &graph, &run_id, Some(&current))?;
-    }
-
-    let mut swept = 0;
-    let swaps: Vec<_> = ledger::sweep_plan(&store, &current)
-        .map_err(io)?
-        .into_iter()
-        .filter(|(node, _)| !graph.frozen.contains(node))
-        .collect();
-    if !swaps.is_empty() {
-        let before = all_tests(&crate_dir, &graph);
-        let mut candidate = graph.clone();
-        for (node, version) in &swaps {
-            let body = store.get_version(version).map_err(io)?.body;
-            if let Some(n) = candidate.nodes.get_mut(node) {
-                n.body = body;
-            }
-        }
-        let after = all_tests(&crate_dir, &candidate);
-        let better = after.compiled && (!before.compiled || failing(&after) <= failing(&before));
-        eprintln!(
-            "sweep: {} nodes back to their last good version: {} failing tests before, {} after{}",
-            swaps.len(),
-            failing(&before),
-            failing(&after),
-            if better {
-                ""
-            } else {
-                " (kept the current code)"
-            }
-        );
-        if better {
-            graph = candidate;
-            current = record_view(&mut store, &graph, &run_id, Some(&current))?;
-            swept = swaps.len();
-        }
-    }
-
-    let final_report = all_tests(&crate_dir, &graph);
-    let lint_report = verify::clippy(&crate_dir, &assemble(&graph)).map_err(|e| e.to_string())?;
-    store
-        .put_results(Results {
-            view: current.id.clone(),
-            tests: cli::outcomes_of(&final_report),
-            benches: Vec::new(),
-            clippy_clean: Some(lint_report.ok),
-            recorded_ms: now_ms(),
-        })
-        .map_err(io)?;
-    let oracle_ok = match &args.oracle {
-        Some(path) => Some(run_oracle(&crate_dir, &graph, path)?),
-        None => None,
-    };
-
-    let ledger_all = ledger::ledger(&store).map_err(io)?;
-    let failures: BTreeMap<NodeId, String> = outcome.failed.iter().cloned().collect();
-    let reports = handoff::node_reports(&graph, &final_report, &failures, &store);
     let handoff_dir = args.handoff.clone().unwrap_or_else(|| {
         let mut name = crate_dir.as_os_str().to_owned();
         name.push("-handoff");
         PathBuf::from(name)
     });
-    handoff::write_repo(
-        &store,
-        &current.id,
-        Some(&crate_dir.join("Cargo.toml")),
-        &handoff_dir,
-        &format!(
-            "{}{}{}",
-            handoff::render(&graph, &reports),
-            ledger::summary_markdown(&ledger_all),
-            review_section(&review_notes)
-        ),
+    let job = session::Job {
+        crate_dir: &crate_dir,
+        store_dir: &store_dir,
+        handoff_dir: &handoff_dir,
+        spec: &spec,
+        oracle: args.oracle.as_deref(),
+    };
+    let usage = || {
+        (
+            plugin.usage.input.load(Ordering::Relaxed),
+            plugin.usage.output.load(Ordering::Relaxed),
+        )
+    };
+    let finished = session::run_graph(
+        &job,
+        graph,
+        untested,
+        review_notes,
+        run_id,
+        store,
+        generator_pool(&plugin, width),
+        &mut gen,
+        started,
+        &usage,
     )?;
-
-    let mut metrics = RunMetrics::default();
-    for (id, n) in &outcome.retries {
-        for _ in 0..*n {
-            metrics.record_retry(id);
-        }
-    }
-    metrics.input_tokens = plugin.usage.input.load(Ordering::Relaxed);
-    metrics.output_tokens = plugin.usage.output.load(Ordering::Relaxed);
-    metrics.wall_ms = started.elapsed().as_millis() as u64;
-
-    outcome
-        .failed
-        .retain(|(id, _)| graph.nodes.get(id).is_some_and(|n| !n.is_filled()));
-    let ok = outcome.failed.is_empty()
-        && untested.is_empty()
-        && final_report.compiled
-        && failing(&final_report) == 0
-        && lint_report.ok
-        && oracle_ok.unwrap_or(true);
-    let summary = serde_json::json!({
-        "ok": ok,
-        "view": current.id.0,
-        "store": store_dir.display().to_string(),
-        "handoff": handoff_dir.display().to_string(),
-        "structural": reports.iter().filter(|r| !r.structure.is_empty()).map(|r| format!("{}: {}", r.node.0, r.structure.join("; "))).collect::<Vec<_>>(),
-        "start_here": handoff::start_here(&graph, &reports).iter().map(|n| n.0.clone()).collect::<Vec<_>>(),
-        "nodes": graph.nodes.len(),
-        "tests": test_count,
-        "failed_nodes": outcome.failed.iter().map(|(id, why)| format!("{}: {why}", id.0)).collect::<Vec<_>>(),
-        "untested_nodes": untested.iter().map(|(id, _)| id.0.clone()).collect::<Vec<_>>(),
-        "failing_tests": failing(&final_report),
-        "skeleton_review": review_notes,
-        "swept_to_last_good": swept,
-        "failures_seen": ledger_all.len(),
-        "failures_open": ledger_all.iter().filter(|f| f.is_open()).count(),
-        "rollbacks": outcome.rollbacks.iter().map(|(id, n)| (id.0.clone(), *n)).collect::<BTreeMap<_, _>>(),
-        "clippy_clean": lint_report.ok,
-        "oracle_passed": oracle_ok,
-        "metrics": serde_json::from_str::<serde_json::Value>(&metrics.to_json()).unwrap_or_default(),
-    });
-    println!("{summary:#}");
-    Ok(ok)
-}
-
-fn review_section(notes: &[String]) -> String {
-    if notes.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("## Skeleton review\n\n");
-    for note in notes {
-        out.push_str(&format!("- {note}\n"));
-    }
-    out.push('\n');
-    out
+    println!("{:#}", finished.summary);
+    Ok(finished.ok)
 }
 
 fn schema_cmd(args: Vec<String>) -> Result<(), String> {
@@ -723,6 +388,8 @@ fn schema_cmd(args: Vec<String>) -> Result<(), String> {
         args,
         &[
             "--guide",
+            "--from",
+            "--change",
             "--out",
             "--rounds",
             "--provider",
@@ -746,14 +413,38 @@ fn schema_cmd(args: Vec<String>) -> Result<(), String> {
     )?;
     let mut gen = plugin.generator(None);
     let crate_dir = PathBuf::from(dir);
-    let built = schema::build(
-        &crate_dir,
-        &spec,
-        &guide,
-        &mut gen,
-        &mut |g: &Graph| check_graph(&crate_dir, g),
-        rounds,
-    )?;
+    let built = match (flags.path("--from"), flags.path("--change")) {
+        (None, None) => schema::build(
+            &crate_dir,
+            &spec,
+            &guide,
+            &mut gen,
+            &mut |g: &Graph| check_graph(&crate_dir, g),
+            rounds,
+        )?,
+        (Some(from), Some(change)) => {
+            let current =
+                std::fs::read_to_string(&from).map_err(|e| format!("{}: {e}", from.display()))?;
+            let change = std::fs::read_to_string(&change)
+                .map_err(|e| format!("{}: {e}", change.display()))?;
+            let up = schema::upgrade(
+                &crate_dir,
+                &spec,
+                &guide,
+                &current,
+                &change,
+                &mut gen,
+                &mut |g: &Graph| check_graph(&crate_dir, g),
+                rounds,
+            )?;
+            eprint!("{}", up.diff.render());
+            if up.diff.is_empty() {
+                eprintln!("schema: the change left every item as it was");
+            }
+            up.schema
+        }
+        _ => return Err("--from and --change go together".to_string()),
+    };
     for note in &built.notes {
         eprintln!("schema: {note}");
     }

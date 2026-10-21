@@ -1,5 +1,6 @@
 -include .env
-export CARGO_REGISTRY_TOKEN ?= $(PUB_NEW_CRATE_TOKEN)
+# only when creating
+# export CARGO_REGISTRY_TOKEN ?= $(PUB_NEW_CRATE_TOKEN)
 
 .PHONY: publish publish-dry build test lint check site site-data site-dev site-clean
 

@@ -5,6 +5,7 @@
 ## 0.2.0
 
 - `sg schema <spec.md> <crate_dir>` writes a compiling schema (types, constants and signatures with `todo!()` bodies) and prints it with its `[dependencies]`. The model writes one draft; after that each compile error is traced to the item it sits in and only the failing items are rewritten, so one bad type no longer costs the ones that were right. The same builder is available as `snippet_graph::schema::build`.
+- `sg schema <spec.md> <crate_dir> --from <schema> --change <request.md>` upgrades an existing schema instead of drafting a new one. The model restates only the items that are new or must change (and lists names to delete under `// === remove ===`); they are merged by name and the same per-item repair brings the result back to compiling. The diff (`+` added, `~` changed, `-` removed) is printed to stderr, so only those items need fresh tests and bodies. Library: `snippet_graph::schema::upgrade`, `schema::diff`.
 
 ## 0.1.1
 

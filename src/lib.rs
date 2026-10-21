@@ -20,6 +20,7 @@ pub mod results;
 pub mod review;
 pub mod revise;
 pub mod schema;
+pub mod session;
 pub mod skeleton;
 pub mod store;
 pub mod structure;

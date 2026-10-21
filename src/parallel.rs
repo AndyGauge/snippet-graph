@@ -3,9 +3,9 @@ use crate::model::{Graph, NodeId, NodeKind, TestOutcome};
 use crate::version::{RunId, Store, StoreError, View};
 use std::collections::BTreeMap;
 
-fn generate_round(
+fn generate_round<'a>(
     graph: &Graph,
-    generators: &mut [Box<dyn Generator + Send>],
+    generators: &mut [Box<dyn Generator + Send + 'a>],
     todo: &[(NodeId, Vec<String>)],
 ) -> Vec<Result<String, String>> {
     let width = generators.len();
@@ -46,9 +46,9 @@ fn generate_round(
 /// Fill each dependency level (`order::levels`) concurrently, one worker per
 /// generator, then check the level before moving on. Results are merged in
 /// `NodeId` order so output matches a serial run.
-pub fn fill_parallel(
+pub fn fill_parallel<'a>(
     graph: &mut Graph,
-    generators: &mut [Box<dyn Generator + Send>],
+    generators: &mut [Box<dyn Generator + Send + 'a>],
     check: &(dyn Fn(&Graph) -> BTreeMap<NodeId, Vec<String>> + Sync),
     max_retries: usize,
 ) -> Outcome {
@@ -62,9 +62,9 @@ pub fn fill_parallel(
 /// node's previous attempt), records one view and results per round, and adds
 /// earlier failures for each node to its retry prompt. Returns the final view.
 #[allow(clippy::too_many_arguments)]
-pub fn fill_parallel_versioned(
+pub fn fill_parallel_versioned<'a>(
     graph: &mut Graph,
-    generators: &mut [Box<dyn Generator + Send>],
+    generators: &mut [Box<dyn Generator + Send + 'a>],
     check: &(dyn Fn(&Graph) -> BTreeMap<NodeId, Vec<String>> + Sync),
     max_retries: usize,
     store: &mut dyn Store,
@@ -78,9 +78,9 @@ pub fn fill_parallel_versioned(
     Ok((outcome, view))
 }
 
-fn fill_parallel_impl(
+fn fill_parallel_impl<'a>(
     graph: &mut Graph,
-    generators: &mut [Box<dyn Generator + Send>],
+    generators: &mut [Box<dyn Generator + Send + 'a>],
     check: &(dyn Fn(&Graph) -> BTreeMap<NodeId, Vec<String>> + Sync),
     max_retries: usize,
     mut rec: Option<&mut Recorder<'_>>,
